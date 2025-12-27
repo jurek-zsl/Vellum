@@ -1,4 +1,5 @@
 vellum
 .DS_Store
 debug.log
-internal/DS_Store
+internal/.DS_Store
+cmd/.DS_Store
