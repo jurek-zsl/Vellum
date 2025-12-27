@@ -3,3 +3,4 @@ vellum
 debug.log
 internal/.DS_Store
 cmd/.DS_Store
+test.sh

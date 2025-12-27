@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/jurekzsl/vellum/internal/config"
@@ -21,34 +22,97 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		h, v := appStyle.GetFrameSize()
-		// Logo (6) + Footer (2) + Margins/Padding approx 4
-		headerHeight := 6
-		footerHeight := 3
-		
+		h, _ := appStyle.GetFrameSize()
+
 		// List border/padding
-		lh, lv := listStyle.GetFrameSize()
-		
-		m.list.SetSize(msg.Width-h-lh, msg.Height-v-headerHeight-footerHeight-lv)
+		lh, _ := listStyle.GetFrameSize()
+
+		m.width = msg.Width
+		m.height = msg.Height
+		m.searchInput.Width = msg.Width - h - lh - 4 // Adjust search width
+		m.updateListHeight()
 
 	case itemsLoadedMsg:
 		items := make([]list.Item, len(msg))
 		for i, item := range msg {
 			items[i] = item
 		}
+		m.allItems = items
 		cmds = append(cmds, m.list.SetItems(items))
+		m.updateListHeight()
 
 	case tea.KeyMsg:
-		// Global keys
-		if m.state == stateList {
-			if m.list.FilterState() == list.Filtering {
-				// Allow list to handle filtering keys
-				m.list, cmd = m.list.Update(msg)
-				return m, cmd
+		// If form is active, it handles keys
+		if m.state == stateForm {
+			break
+		}
+
+		// Search Input Handling
+		if m.searchInput.Focused() {
+			switch msg.String() {
+			case "enter", "down":
+				m.searchInput.Blur()
+				return m, nil
+			case "esc":
+				m.searchInput.Blur()
+				return m, nil
+			default:
+				m.searchInput, cmd = m.searchInput.Update(msg)
+				cmds = append(cmds, cmd)
+
+				// Filter logic
+				val := m.searchInput.Value()
+				var filtered []list.Item
+				if val == "" {
+					filtered = m.allItems
+				} else {
+					for _, item := range m.allItems {
+						if meta, ok := item.(model.Metadata); ok {
+							matches := false
+
+							// Special tags
+							if strings.Contains(val, "#S") || strings.Contains(val, "#s") {
+								if meta.Type == model.TypeScript {
+									matches = true
+								}
+							} else if strings.Contains(val, "#A") || strings.Contains(val, "#a") {
+								if meta.Type == model.TypeAlias {
+									matches = true
+								}
+							} else {
+								// Normal search
+								if strings.Contains(strings.ToLower(meta.Name), strings.ToLower(val)) ||
+									strings.Contains(strings.ToLower(meta.Command), strings.ToLower(val)) {
+									matches = true
+								}
+							}
+
+							if matches {
+								filtered = append(filtered, item)
+							}
+						}
+					}
+				}
+				cmds = append(cmds, m.list.SetItems(filtered))
+				m.updateListHeight()
+				return m, tea.Batch(cmds...)
 			}
+		}
+
+		// Key bindings when list is focused
+		switch msg.String() {
+		case "/":
+			m.searchInput.Focus()
+			return m, textinput.Blink
+		}
+
+		// Fallthrough only if not caught above
+		if m.state == stateList {
 			switch msg.String() {
 			case "ctrl+c", "q":
-				return m, tea.Quit
+				if !m.searchInput.Focused() {
+					return m, tea.Quit
+				}
 			case "a":
 				m.state = stateForm
 				m.formData = &formData{mode: "create", itemType: "script"}
@@ -73,6 +137,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if i := m.list.SelectedItem(); i != nil {
 					meta := i.(model.Metadata)
 					m.store.DeleteItem(meta)
+					// Remove from allItems as well
+					// Re-loading is safer
 					return m, loadItems(m.store)
 				}
 			case "e":
@@ -155,6 +221,60 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m *Model) updateListHeight() {
+	if m.width == 0 || m.height == 0 {
+		return
+	}
+
+	h, v := appStyle.GetFrameSize()
+	lh, _ := listStyle.GetFrameSize() // Use only width overhead
+
+	// Estimated overhead:
+	// Logo: ~6 lines (with margins)
+	// Search: ~4 lines
+	// Header: ~2 lines
+	// Footer: ~3 lines
+	// Padding: ~2 lines
+	// Total overhead ~ 17-19 lines.
+	// We use 19 to be safe.
+	overhead := 19
+
+	// Available height for the list frame (including border)
+	// listStyle usually adds border (2 lines).
+	// So max content height is roughly available - 2.
+	// But SetSize sets the size of the list component including its internal paginator/help/etc?
+	// The bubbletea list component SetSize usually sets the size including borders if the list handles borders,
+	// but here we wrap list in listStyle.
+	// Bubbles list SetSize(width, height) sets the height of the list logic (items + pagination).
+	// listStyle is an external wrapper.
+	// m.list.SetSize sets the size of the INNER content if we render it like listStyle.Render(m.list.View()).
+	// Actually, m.list.SetSize sets the dimensions of the list MODEL.
+	// If we wrap it, we subtract wrapper overhead.
+
+	// Let's assume listStyle.GetFrameSize returns horizontal and vertical overhead (borders/padding).
+	_, lv := listStyle.GetFrameSize()
+
+	availableHeight := m.height - v - overhead - lv
+	if availableHeight < 1 {
+		availableHeight = 1
+	}
+
+	// Dynamic sizing based on items
+	itemCount := len(m.list.VisibleItems())
+	// Min height
+	targetHeight := itemCount
+	if targetHeight < 5 {
+		targetHeight = 5
+	}
+
+	// Cap at available height
+	if targetHeight > availableHeight {
+		targetHeight = availableHeight
+	}
+
+	m.list.SetSize(m.width-h-lh, targetHeight)
+}
+
 func (m *Model) processForm() error {
 	if m.formData.mode == "create" || m.formData.mode == "edit" {
 		if m.formData.itemType == "script" || m.formData.itemType == string(model.TypeScript) {
@@ -171,11 +291,11 @@ func (m *Model) processForm() error {
 			return m.store.SaveScript(meta, m.formData.content)
 		} else { // Alias
 			meta := model.Metadata{
-				ID:          strings.ToLower(m.formData.name),
-				Name:        m.formData.name,
-				Desc:        m.formData.description,
-				Type:        model.TypeAlias,
-				Command:     m.formData.command,
+				ID:      strings.ToLower(m.formData.name),
+				Name:    m.formData.name,
+				Desc:    m.formData.description,
+				Type:    model.TypeAlias,
+				Command: m.formData.command,
 			}
 			if err := m.store.SaveAlias(meta); err != nil {
 				return err
@@ -200,11 +320,11 @@ func (m *Model) processForm() error {
 	} else if m.formData.mode == "alias" {
 		meta := model.Metadata{
 
-			ID:          strings.ToLower(m.formData.name),
-			Name:        m.formData.name,
-			Desc:        m.formData.description,
-			Type:        model.TypeAlias,
-			Command:     m.formData.command,
+			ID:      strings.ToLower(m.formData.name),
+			Name:    m.formData.name,
+			Desc:    m.formData.description,
+			Type:    model.TypeAlias,
+			Command: m.formData.command,
 		}
 		if err := m.store.SaveAlias(meta); err != nil {
 			return err
@@ -241,7 +361,7 @@ func (m *Model) newCreateScriptForm() *huh.Form {
 			huh.NewText().Title("Script Content").Value(&m.formData.content),
 			huh.NewConfirm().Title("Requires Sudo?").Value(&m.formData.requiresSudo),
 		),
-	)
+	).WithTheme(huh.ThemeDracula())
 }
 
 func (m *Model) newImportScriptForm() *huh.Form {
@@ -251,7 +371,7 @@ func (m *Model) newImportScriptForm() *huh.Form {
 			huh.NewInput().Title("File Path").Value(&m.formData.filePath),
 			huh.NewInput().Title("Description").Value(&m.formData.description),
 		),
-	)
+	).WithTheme(huh.ThemeDracula())
 }
 
 func (m *Model) newAliasForm() *huh.Form {
@@ -261,7 +381,7 @@ func (m *Model) newAliasForm() *huh.Form {
 			huh.NewInput().Title("Description").Value(&m.formData.description),
 			huh.NewInput().Title("Command").Value(&m.formData.command),
 		),
-	)
+	).WithTheme(huh.ThemeDracula())
 }
 
 func (m *Model) newEditScriptForm() *huh.Form {
@@ -270,7 +390,7 @@ func (m *Model) newEditScriptForm() *huh.Form {
 			huh.NewInput().Title("Name").Value(&m.formData.name), // Maybe readonly?
 			huh.NewText().Title("Script Content").Value(&m.formData.content),
 		),
-	)
+	).WithTheme(huh.ThemeDracula())
 }
 
 func (m *Model) newConfigForm() *huh.Form {
@@ -278,5 +398,5 @@ func (m *Model) newConfigForm() *huh.Form {
 		huh.NewGroup(
 			huh.NewInput().Title("Vellum Directory").Value(&m.formData.name),
 		),
-	)
+	).WithTheme(huh.ThemeDracula())
 }
