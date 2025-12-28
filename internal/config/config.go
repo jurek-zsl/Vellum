@@ -7,7 +7,16 @@ import (
 )
 
 type Config struct {
-	VellumDir string `json:"vellum_dir"`
+	VellumDir        string `json:"vellum_dir"`
+	Theme            string `json:"theme"`              // hex color
+	LogRetentionDays int    `json:"log_retention_days"` // default 7
+	DefaultEditor    string `json:"default_editor"`     // nano/vim/micro/code
+	SortOrder        string `json:"sort_order"`         // name/lastrun/type
+	DefaultShell     string `json:"default_shell"`      // zsh/bash
+	FileManager      string `json:"file_manager"`       // finder/explorer
+	MaxLogFiles      int    `json:"max_log_files"`      // before cleanup
+	LazyLoad         bool   `json:"lazy_load"`
+	CacheEnabled     bool   `json:"cache_enabled"`
 }
 
 func getConfigPath() (string, error) {
@@ -15,7 +24,13 @@ func getConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".config", "vellum")
+	// Per user request, check ~/vellum/config.json first or create it there?
+	// Request said: "create config.json in ~/vellum/config.json when there is no config.js there"
+	// and "Remove changing main vellum directory at all".
+	// So we should assume VellumDir is ~/vellum and config is inside it.
+
+	// Let's standardise on ~/vellum/config.json
+	dir := filepath.Join(home, "vellum")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
@@ -30,10 +45,37 @@ func LoadConfig() (*Config, error) {
 
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		// Return default
+		// Detect defaults
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/bash"
+		}
+
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			editor = "nano"
+		}
+
+		var fileManager string
+		// Simple heuristic
+		if _, err := os.Stat("/Applications"); err == nil {
+			fileManager = "open" // MacOS
+		} else {
+			fileManager = "xdg-open" // Linux fallback
+		}
+
 		home, _ := os.UserHomeDir()
 		cfg := &Config{
-			VellumDir: filepath.Join(home, "vellum"),
+			VellumDir:        filepath.Join(home, "vellum"),
+			Theme:            "#BD93F9",
+			LogRetentionDays: 7,
+			DefaultEditor:    editor,
+			SortOrder:        "name",
+			DefaultShell:     shell,
+			FileManager:      fileManager,
+			MaxLogFiles:      100,
+			LazyLoad:         true,
+			CacheEnabled:     true,
 		}
 		_ = SaveConfig(cfg)
 		return cfg, nil
@@ -45,6 +87,21 @@ func LoadConfig() (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+
+	// Set defaults for missing fields if older config exists
+	if cfg.Theme == "" {
+		cfg.Theme = "#BD93F9"
+	}
+	if cfg.LogRetentionDays == 0 {
+		cfg.LogRetentionDays = 7
+	}
+	if cfg.DefaultShell == "" {
+		cfg.DefaultShell = os.Getenv("SHELL")
+	}
+	if cfg.SortOrder == "" {
+		cfg.SortOrder = "name"
+	}
+
 	return &cfg, nil
 }
 

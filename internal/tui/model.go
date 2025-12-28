@@ -48,10 +48,13 @@ type formData struct {
 	requiresSudo bool
 	usesParams   bool
 	filePath     string // for import
+	confirm      bool   // for deletion confirmation
+	sourceName   string // for copy operation
 }
 
 func InitialModel() Model {
 	cfg, _ := config.LoadConfig()
+	UpdateStyles(cfg.Theme) // Apply theme
 	s := store.NewStore(cfg)
 	s.EnsureDirs()
 	s.CleanLogs()

@@ -78,7 +78,7 @@ Configuration is stored in `~/.config/vellum/config.json`.
 > For now there are only few script types available. I'm going to add more script types with each update.
 
 - **Coding**: `Python (.py)`, `JavaScript(.js)`, ~`Ruby (.rb)`~, ~`Perl (.pl)`~, ~`PHP (.php)`~, ~`Lua (.lua)`~, ~`Tcl (.tcl)`~, ~`TS (.ts)`~, ~`JSX (.jsx)`~, ~`TSX (.tsx)`~
-- **Shell**: `Bash (.sh)`, ~`Zsh (.zsh)`~, ~`Fish (.fish)`~, ~`PowerShell (.ps1)`~
+- **Shell**: `Bash (.sh)`, ~`Fish (.fish)`~, ~`PowerShell (.ps1)`~
 - **Compiled**: `Go (.go)`, ~`Rust (.rs)`~, ~`Java (.java)`~, ~`Kotlin (.kt)`~, ~`Swift (.swift)`~
 - **System**: ~`Bat (.bat)`~, ~`Cmd (.cmd)`~, ~`VBS (.vbs)`~, ~`AppleScript (.applescript)`~
 

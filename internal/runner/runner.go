@@ -10,13 +10,15 @@ import (
 	"github.com/jurekzsl/vellum/internal/model"
 )
 
-func PrepareCommand(item model.Metadata, params []string, logFile *os.File) (*exec.Cmd, error) {
+func PrepareCommand(item model.Metadata, params []string, logFile *os.File, shell string) (*exec.Cmd, error) {
+	if shell == "" {
+		shell = "/bin/sh"
+	}
 	var parts []string
 
 	if item.Type == model.TypeAlias {
-		// For aliases, run directly in sh
-		// We wrap this later, so we just take the command string
-		parts = []string{"/bin/sh", "-c", item.Command}
+		// For aliases, run directly in user's shell
+		parts = []string{shell, "-c", item.Command}
 	} else {
 		interpreter := getInterpreter(item.ScriptType)
 		if interpreter != "" {
@@ -32,7 +34,9 @@ func PrepareCommand(item model.Metadata, params []string, logFile *os.File) (*ex
 	parts = append(parts, params...)
 
 	// Always use Sudo as requested
-	parts = append([]string{"sudo"}, parts...)
+	if item.RequiresSudo {
+		parts = append([]string{"sudo"}, parts...)
+	}
 
 	// Quote parts for shell wrapper
 	var quotedParts []string
@@ -45,7 +49,7 @@ func PrepareCommand(item model.Metadata, params []string, logFile *os.File) (*ex
 
 	// Wrap in shell to wait for Enter
 	wrapper := fmt.Sprintf("%s; echo ''; echo 'Press Enter to return to Vellum...'; read line", fullCmd)
-	cmd := exec.Command("/bin/sh", "-c", wrapper)
+	cmd := exec.Command(shell, "-c", wrapper)
 
 	mwOut := io.MultiWriter(os.Stdout, logFile)
 	mwErr := io.MultiWriter(os.Stderr, logFile)
@@ -92,43 +96,43 @@ func getInterpreter(t model.ScriptType) string {
 
 // Special handling for multi-word interpreters like "go run"
 func PrepareCommandWithInterpreter(item model.Metadata, params []string, logFile *os.File) (*exec.Cmd, error) {
-    // Re-implementing simplified logic to handle "go run" split
-    var parts []string
-    
-    interpreter := getInterpreter(item.ScriptType)
-    if interpreter == "go run" {
-        parts = []string{"go", "run"}
-    } else if interpreter != "" {
-        parts = []string{interpreter}
-    }
+	// Re-implementing simplified logic to handle "go run" split
+	var parts []string
 
-    if item.Type == model.TypeAlias {
-         parts = []string{"/bin/sh", "-c", item.Command}
-    } else {
-        if len(parts) > 0 {
-             parts = append(parts, item.FilePath)
-        } else {
-            parts = []string{item.FilePath}
-        }
-    }
+	interpreter := getInterpreter(item.ScriptType)
+	if interpreter == "go run" {
+		parts = []string{"go", "run"}
+	} else if interpreter != "" {
+		parts = []string{interpreter}
+	}
 
-    parts = append(parts, params...)
+	if item.Type == model.TypeAlias {
+		parts = []string{"/bin/sh", "-c", item.Command}
+	} else {
+		if len(parts) > 0 {
+			parts = append(parts, item.FilePath)
+		} else {
+			parts = []string{item.FilePath}
+		}
+	}
 
-    if item.RequiresSudo {
-        parts = append([]string{"sudo"}, parts...)
-    }
-    
-    name := parts[0]
-    args := parts[1:]
+	parts = append(parts, params...)
 
-    cmd := exec.Command(name, args...)
-    
-    mwOut := io.MultiWriter(os.Stdout, logFile)
-    mwErr := io.MultiWriter(os.Stderr, logFile)
+	if item.RequiresSudo {
+		parts = append([]string{"sudo"}, parts...)
+	}
+
+	name := parts[0]
+	args := parts[1:]
+
+	cmd := exec.Command(name, args...)
+
+	mwOut := io.MultiWriter(os.Stdout, logFile)
+	mwErr := io.MultiWriter(os.Stderr, logFile)
 
 	cmd.Stdout = mwOut
 	cmd.Stderr = mwErr
 	cmd.Stdin = os.Stdin
 
-    return cmd, nil
+	return cmd, nil
 }

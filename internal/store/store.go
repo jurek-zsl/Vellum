@@ -21,6 +21,19 @@ func NewStore(cfg *config.Config) *Store {
 	return &Store{cfg: cfg}
 }
 
+func (s *Store) CreateLogFile(item model.Metadata) (*os.File, error) {
+	var dir string
+	if item.Type == model.TypeScript {
+		dir = filepath.Join(s.cfg.VellumDir, "scripts", item.Name)
+	} else {
+		dir = filepath.Join(s.cfg.VellumDir, "aliases", item.Name)
+	}
+
+	timestamp := time.Now().Format("02:01:2006-15:04:05")
+	filename := fmt.Sprintf("%s.log", timestamp)
+	return os.Create(filepath.Join(dir, filename))
+}
+
 func (s *Store) EnsureDirs() error {
 	dirs := []string{
 		s.cfg.VellumDir,
@@ -76,12 +89,88 @@ func (s *Store) ListItems() ([]model.Metadata, error) {
 		}
 	}
 
-	// Sort by Name
+	// Sort items
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].Name < items[j].Name
+		switch s.cfg.SortOrder {
+		case "lastrun":
+			return items[i].LastRunAt.After(items[j].LastRunAt)
+		case "type":
+			if items[i].Type != items[j].Type {
+				return items[i].Type < items[j].Type
+			}
+			return items[i].Name < items[j].Name
+		default: // "name"
+			return items[i].Name < items[j].Name
+		}
 	})
 
 	return items, nil
+}
+
+func (s *Store) CleanLogs() {
+	if s.cfg.LogRetentionDays <= 0 && s.cfg.MaxLogFiles <= 0 {
+		return
+	}
+
+	logsDir := filepath.Join(s.cfg.VellumDir, "logs")
+	entries, err := os.ReadDir(logsDir)
+	if err != nil {
+		return
+	}
+
+	var logFiles []os.DirEntry
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
+			logFiles = append(logFiles, e)
+		}
+	}
+
+	// Sort by modification time (oldest first)
+	sort.Slice(logFiles, func(i, j int) bool {
+		iv, _ := logFiles[i].Info()
+		jv, _ := logFiles[j].Info()
+		return iv.ModTime().Before(jv.ModTime())
+	})
+
+	// 1. Retention Days Cleanup
+	if s.cfg.LogRetentionDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -s.cfg.LogRetentionDays)
+		for _, f := range logFiles {
+			info, _ := f.Info()
+			if info.ModTime().Before(cutoff) {
+				os.Remove(filepath.Join(logsDir, f.Name()))
+			}
+		}
+	}
+
+	// Re-read after retention cleanup? Or just filter locally.
+	// Let's re-read to be safe or just proceed with remaining count if we filtered array.
+	// 2. Max Files Cleanup
+	if s.cfg.MaxLogFiles > 0 {
+		// Re-read entries remaining
+		entries, _ := os.ReadDir(logsDir)
+		var validLogs []os.DirEntry
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
+				validLogs = append(validLogs, e)
+			}
+		}
+
+		if len(validLogs) > s.cfg.MaxLogFiles {
+			// Sort again oldest first
+			sort.Slice(validLogs, func(i, j int) bool {
+				iv, _ := validLogs[i].Info()
+				jv, _ := validLogs[j].Info()
+				return iv.ModTime().Before(jv.ModTime())
+			})
+
+			// Remove oldest until we meet quota
+			removeCount := len(validLogs) - s.cfg.MaxLogFiles
+			for i := 0; i < removeCount; i++ {
+				os.Remove(filepath.Join(logsDir, validLogs[i].Name()))
+			}
+		}
+	}
 }
 
 func (s *Store) loadMetadata(path string) (model.Metadata, error) {
@@ -134,23 +223,13 @@ func (s *Store) saveMetadata(path string, meta model.Metadata) error {
 }
 
 func (s *Store) DeleteItem(item model.Metadata) error {
-	var dir string
-	if item.Type == model.TypeScript {
-		dir = filepath.Join(s.cfg.VellumDir, "scripts", item.Name)
-	} else {
-		dir = filepath.Join(s.cfg.VellumDir, "aliases", item.Name)
-	}
+	dir := s.GetItemDir(item)
 	return os.RemoveAll(dir)
 }
 
 func (s *Store) UpdateLastRun(item model.Metadata) error {
 	item.LastRunAt = time.Now()
-	var dir string
-	if item.Type == model.TypeScript {
-		dir = filepath.Join(s.cfg.VellumDir, "scripts", item.Name)
-	} else {
-		dir = filepath.Join(s.cfg.VellumDir, "aliases", item.Name)
-	}
+	dir := s.GetItemDir(item)
 	return s.saveMetadata(filepath.Join(dir, "metadata.json"), item)
 }
 
@@ -163,4 +242,37 @@ func (s *Store) GetScriptContent(item model.Metadata) (string, error) {
 		return "", err
 	}
 	return string(content), nil
+}
+
+func (s *Store) GetItemDir(item model.Metadata) string {
+	if item.Type == model.TypeScript {
+		return filepath.Join(s.cfg.VellumDir, "scripts", item.Name)
+	}
+	return filepath.Join(s.cfg.VellumDir, "aliases", item.Name)
+}
+
+// CopyScript copies an existing script to a new name
+func (s *Store) CopyScript(src model.Metadata, newName string) error {
+	content, err := s.GetScriptContent(src)
+	if err != nil {
+		return err
+	}
+
+	newMeta := src
+	newMeta.Name = newName
+	newMeta.ID = strings.ToLower(newName)
+	newMeta.LastRunAt = time.Time{} // Reset run time
+
+	// Create new directory and save
+	return s.SaveScript(newMeta, content)
+}
+
+// CopyAlias copies an existing alias to a new name
+func (s *Store) CopyAlias(src model.Metadata, newName string) error {
+	newMeta := src
+	newMeta.Name = newName
+	newMeta.ID = strings.ToLower(newName)
+	newMeta.LastRunAt = time.Time{}
+
+	return s.SaveAlias(newMeta)
 }
