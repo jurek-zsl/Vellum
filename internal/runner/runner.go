@@ -10,7 +10,7 @@ import (
 	"github.com/jurekzsl/vellum/internal/model"
 )
 
-func PrepareCommand(item model.Metadata, params []string, logFile *os.File, shell string) (*exec.Cmd, error) {
+func PrepareCommand(item model.Metadata, params []string, logFile *os.File, shell string, user string) (*exec.Cmd, error) {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
@@ -49,7 +49,14 @@ func PrepareCommand(item model.Metadata, params []string, logFile *os.File, shel
 
 	// Wrap in shell to wait for Enter
 	wrapper := fmt.Sprintf("%s; echo ''; echo 'Press Enter to return to Vellum...'; read line", fullCmd)
-	cmd := exec.Command(shell, "-c", wrapper)
+
+	var cmd *exec.Cmd
+	if user != "" {
+		// Run as user: sudo -u user shell -c wrapper
+		cmd = exec.Command("sudo", "-u", user, shell, "-c", wrapper)
+	} else {
+		cmd = exec.Command(shell, "-c", wrapper)
+	}
 
 	mwOut := io.MultiWriter(os.Stdout, logFile)
 	mwErr := io.MultiWriter(os.Stderr, logFile)

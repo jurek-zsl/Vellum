@@ -7,7 +7,7 @@ import (
 )
 
 type Config struct {
-	VellumDir        string `json:"vellum_dir"`
+	VellumDir        string `json:"-"`                  // Hardcoded to ~/vellum
 	Theme            string `json:"theme"`              // hex color
 	LogRetentionDays int    `json:"log_retention_days"` // default 7
 	DefaultEditor    string `json:"default_editor"`     // nano/vim/micro/code
@@ -24,12 +24,7 @@ func getConfigPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// Per user request, check ~/vellum/config.json first or create it there?
-	// Request said: "create config.json in ~/vellum/config.json when there is no config.js there"
-	// and "Remove changing main vellum directory at all".
-	// So we should assume VellumDir is ~/vellum and config is inside it.
-
-	// Let's standardise on ~/vellum/config.json
+	// VellumDir is always ~/vellum and config is inside it.
 	dir := filepath.Join(home, "vellum")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
@@ -43,6 +38,10 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	// Hardcoded VellumDir
+	home, _ := os.UserHomeDir()
+	vellumDir := filepath.Join(home, "vellum")
+
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		// Detect defaults
@@ -51,30 +50,22 @@ func LoadConfig() (*Config, error) {
 			shell = "/bin/bash"
 		}
 
+		// Editor defaults to nano if EDITOR env not set
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
 			editor = "nano"
 		}
 
-		var fileManager string
-		// Simple heuristic
-		if _, err := os.Stat("/Applications"); err == nil {
-			fileManager = "open" // MacOS
-		} else {
-			fileManager = "xdg-open" // Linux fallback
-		}
-
-		home, _ := os.UserHomeDir()
 		cfg := &Config{
-			VellumDir:        filepath.Join(home, "vellum"),
-			Theme:            "#BD93F9",
+			VellumDir:        vellumDir,
+			Theme:            "#BD93F9", // Dracula Purple
 			LogRetentionDays: 7,
 			DefaultEditor:    editor,
 			SortOrder:        "name",
 			DefaultShell:     shell,
-			FileManager:      fileManager,
-			MaxLogFiles:      100,
-			LazyLoad:         true,
+			FileManager:      "xdg-open",
+			MaxLogFiles:      50,
+			LazyLoad:         false,
 			CacheEnabled:     true,
 		}
 		_ = SaveConfig(cfg)
@@ -87,6 +78,9 @@ func LoadConfig() (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+
+	// Ensure VellumDir is set (it's ignored in JSON so it will be empty after Unmarshal)
+	cfg.VellumDir = vellumDir
 
 	// Set defaults for missing fields if older config exists
 	if cfg.Theme == "" {

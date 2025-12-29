@@ -12,7 +12,9 @@ func MakeFormTheme(colorStr string) *huh.Theme {
 
 	// ACTIVE (FOCUSED) FIELD STYLES
 	t.Focused.Title = t.Focused.Title.Foreground(c)
-	t.Focused.Base = t.Focused.Base.BorderForeground(c)
+	// Remove left border/padding to prevent jumping/misalignment with blurred fields
+	t.Focused.Base = t.Focused.Base.Border(lipgloss.HiddenBorder()).PaddingLeft(0)
+
 	t.Focused.TextInput.Prompt = t.Focused.TextInput.Prompt.Foreground(c)
 	t.Focused.SelectSelector = t.Focused.SelectSelector.Foreground(c)
 	t.Focused.Option = t.Focused.Option.Foreground(c)
@@ -25,7 +27,24 @@ func MakeFormTheme(colorStr string) *huh.Theme {
 		Background(c).
 		Foreground(lipgloss.Color("#000000")).
 		Bold(true).
-		Padding(0, 1)
+		Bold(true).
+		Padding(0, 1) // Removed MarginLeft(2)
+		// Match input padding? Inputs usually have > prompt. Confirm has nothing?
+		// Actually, standard huh input has "> " prompt.
+		// Confirm title is above.
+		// Detailed view of Confirm shows buttons.
+		// If Inputs have a left border or specific padding in theme, we need to match.
+		// Dracula theme defaults might be different.
+		// Let's try adding specific margin/padding to Title or Base of Confirm?
+		// But here we are styling FocusedButton.
+		// It might be the Card style?
+		// Let's look at updating the Field separation.
+
+	// Let's assume the user means the "Yes/No" buttons are not aligned with "> Value" of inputs.
+	// Inputs have a prompt "> ".
+	// Confirm buttons are just [Yes] [No].
+	// To align them, we might need a margin on the buttons container or the buttons themselves.
+	// We can add MarginLeft(2) to the FocusedButton/BlurredButton to simulate indentation.
 
 	// BlurredButton = The unselected choice (e.g. Yes) -> Should be Neutral (No Purple)
 	t.Focused.BlurredButton = lipgloss.NewStyle().

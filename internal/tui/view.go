@@ -73,13 +73,14 @@ func (m Model) View() string {
 		)
 
 		moreFooter := fmt.Sprintf(
-			"%s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s",
+			"%s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s",
 			keyStyle.Render("a"), descStyle.Render("add"),
 			keyStyle.Render("i"), descStyle.Render("import"),
 			keyStyle.Render("l"), descStyle.Render("alias"),
 			keyStyle.Render("e"), descStyle.Render("edit"),
 			keyStyle.Render("d"), descStyle.Render("del"),
 			keyStyle.Render("c"), descStyle.Render("copy"),
+			keyStyle.Render("r"), descStyle.Render("adv run"),
 			keyStyle.Render("o"), descStyle.Render("open"),
 			keyStyle.Render("q"), descStyle.Render("quit"),
 		)

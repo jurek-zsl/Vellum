@@ -50,6 +50,14 @@ type formData struct {
 	filePath     string // for import
 	confirm      bool   // for deletion confirmation
 	sourceName   string // for copy operation
+
+	// Advanced Run fields
+	advPath    string
+	advParams  string
+	advUser    string
+	advConfirm bool
+	advDelay   string
+	advCopy    bool
 }
 
 func InitialModel() Model {

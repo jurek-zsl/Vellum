@@ -24,13 +24,34 @@ func NewStore(cfg *config.Config) *Store {
 func (s *Store) CreateLogFile(item model.Metadata) (*os.File, error) {
 	var dir string
 	if item.Type == model.TypeScript {
-		dir = filepath.Join(s.cfg.VellumDir, "scripts", item.Name)
+		dir = filepath.Join(s.cfg.VellumDir, "scripts", item.Name, "logs")
 	} else {
-		dir = filepath.Join(s.cfg.VellumDir, "aliases", item.Name)
+		dir = filepath.Join(s.cfg.VellumDir, "aliases", item.Name, "logs")
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
 	}
 
 	timestamp := time.Now().Format("02:01:2006-15:04:05")
 	filename := fmt.Sprintf("%s.log", timestamp)
+	return os.Create(filepath.Join(dir, filename))
+}
+
+func (s *Store) CreateAdvLogFile(item model.Metadata) (*os.File, error) {
+	var dir string
+	if item.Type == model.TypeScript {
+		dir = filepath.Join(s.cfg.VellumDir, "scripts", item.Name, "logs")
+	} else {
+		dir = filepath.Join(s.cfg.VellumDir, "aliases", item.Name, "logs")
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+
+	timestamp := time.Now().Format("02:01:2006-15:04:05")
+	filename := fmt.Sprintf("adv-%s.log", timestamp)
 	return os.Create(filepath.Join(dir, filename))
 }
 
@@ -93,14 +114,18 @@ func (s *Store) ListItems() ([]model.Metadata, error) {
 	sort.Slice(items, func(i, j int) bool {
 		switch s.cfg.SortOrder {
 		case "lastrun":
-			return items[i].LastRunAt.After(items[j].LastRunAt)
+			if !items[i].LastRunAt.Equal(items[j].LastRunAt) {
+				return items[i].LastRunAt.After(items[j].LastRunAt)
+			}
+			// Fallback to name if timestamps are equal
+			return items[i].Name < items[j].Name
 		case "type":
 			if items[i].Type != items[j].Type {
 				return items[i].Type < items[j].Type
 			}
 			return items[i].Name < items[j].Name
 		default: // "name"
-			return items[i].Name < items[j].Name
+			return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
 		}
 	})
 
@@ -112,62 +137,83 @@ func (s *Store) CleanLogs() {
 		return
 	}
 
-	logsDir := filepath.Join(s.cfg.VellumDir, "logs")
-	entries, err := os.ReadDir(logsDir)
-	if err != nil {
-		return
-	}
-
-	var logFiles []os.DirEntry
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
-			logFiles = append(logFiles, e)
+	// Helper to clean logs in a specific directory
+	cleanDir := func(logsDir string) {
+		entries, err := os.ReadDir(logsDir)
+		if err != nil {
+			return
 		}
-	}
 
-	// Sort by modification time (oldest first)
-	sort.Slice(logFiles, func(i, j int) bool {
-		iv, _ := logFiles[i].Info()
-		jv, _ := logFiles[j].Info()
-		return iv.ModTime().Before(jv.ModTime())
-	})
-
-	// 1. Retention Days Cleanup
-	if s.cfg.LogRetentionDays > 0 {
-		cutoff := time.Now().AddDate(0, 0, -s.cfg.LogRetentionDays)
-		for _, f := range logFiles {
-			info, _ := f.Info()
-			if info.ModTime().Before(cutoff) {
-				os.Remove(filepath.Join(logsDir, f.Name()))
-			}
-		}
-	}
-
-	// Re-read after retention cleanup? Or just filter locally.
-	// Let's re-read to be safe or just proceed with remaining count if we filtered array.
-	// 2. Max Files Cleanup
-	if s.cfg.MaxLogFiles > 0 {
-		// Re-read entries remaining
-		entries, _ := os.ReadDir(logsDir)
-		var validLogs []os.DirEntry
+		var logFiles []os.DirEntry
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
-				validLogs = append(validLogs, e)
+				logFiles = append(logFiles, e)
 			}
 		}
 
-		if len(validLogs) > s.cfg.MaxLogFiles {
-			// Sort again oldest first
-			sort.Slice(validLogs, func(i, j int) bool {
-				iv, _ := validLogs[i].Info()
-				jv, _ := validLogs[j].Info()
-				return iv.ModTime().Before(jv.ModTime())
-			})
+		// Sort by modification time (oldest first)
+		sort.Slice(logFiles, func(i, j int) bool {
+			iv, _ := logFiles[i].Info()
+			jv, _ := logFiles[j].Info()
+			return iv.ModTime().Before(jv.ModTime())
+		})
 
-			// Remove oldest until we meet quota
-			removeCount := len(validLogs) - s.cfg.MaxLogFiles
-			for i := 0; i < removeCount; i++ {
-				os.Remove(filepath.Join(logsDir, validLogs[i].Name()))
+		// 1. Retention Days Cleanup
+		if s.cfg.LogRetentionDays > 0 {
+			cutoff := time.Now().AddDate(0, 0, -s.cfg.LogRetentionDays)
+			for _, f := range logFiles {
+				info, _ := f.Info()
+				if info.ModTime().Before(cutoff) {
+					os.Remove(filepath.Join(logsDir, f.Name()))
+				}
+			}
+		}
+
+		// 2. Max Files Cleanup
+		if s.cfg.MaxLogFiles > 0 {
+			// Re-read entries remaining (or filter list)
+			// Efficiently filter the already sorted list if we removed items?
+			// Simpler to just re-scan or track deletions.
+			// Let's re-scan to be safe and simple.
+			entries, _ := os.ReadDir(logsDir)
+			var validLogs []os.DirEntry
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
+					validLogs = append(validLogs, e)
+				}
+			}
+
+			if len(validLogs) > s.cfg.MaxLogFiles {
+				sort.Slice(validLogs, func(i, j int) bool {
+					iv, _ := validLogs[i].Info()
+					jv, _ := validLogs[j].Info()
+					return iv.ModTime().Before(jv.ModTime())
+				})
+
+				removeCount := len(validLogs) - s.cfg.MaxLogFiles
+				for i := 0; i < removeCount; i++ {
+					os.Remove(filepath.Join(logsDir, validLogs[i].Name()))
+				}
+			}
+		}
+	}
+
+	// iterate scripts
+	scriptsDir := filepath.Join(s.cfg.VellumDir, "scripts")
+	if entries, err := os.ReadDir(scriptsDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				cleanDir(filepath.Join(scriptsDir, e.Name(), "logs"))
+			}
+		}
+	}
+
+	// iterate aliases
+	aliasesDir := filepath.Join(s.cfg.VellumDir, "aliases")
+	if entries, err := os.ReadDir(aliasesDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				cleanDir(filepath.Join(aliasesDir, e.Name(), "logs"))
 			}
 		}
 	}
