@@ -26,7 +26,8 @@ type Model struct {
 	config      *config.Config
 
 	// Form data holders
-	formData *formData
+	formData     *formData
+	activeFormID string // tracks current form step (e.g., "create_meta", "create_content")
 
 	// Status/Error
 	status string

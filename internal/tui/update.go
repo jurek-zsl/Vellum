@@ -18,11 +18,19 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
+	"github.com/jurekzsl/vellum/internal/config"
 	"github.com/jurekzsl/vellum/internal/model"
 	"github.com/jurekzsl/vellum/internal/runner"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Key Translation
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.state == stateForm {
+		if keyMsg.String() == "ctrl+]" {
+			msg = tea.KeyMsg{Type: tea.KeyEnter, Alt: true}
+		}
+	}
+
 	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
@@ -129,16 +137,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "a":
 				m.state = stateForm
 				m.formData = &formData{mode: "create", itemType: "script"}
-				m.form = m.newCreateScriptForm()
+				if m.config.DefaultEditor != "" {
+					os.Setenv("EDITOR", m.config.DefaultEditor)
+				}
+				m.activeFormID = "create_meta"
+				m.form = m.newCreateScriptMetaForm()
 				return m, m.form.Init()
-				// ... (This replace is inefficient for just handling Esc. I should insert the Esc handling in the Update loop first).
-				// Let's modify the KeyMsg handler for stateForm.
 
-				m.form = m.newCreateScriptForm()
-				return m, m.form.Init()
 			case "i":
 				m.state = stateForm
 				m.formData = &formData{mode: "import", itemType: "script"}
+				if m.config.DefaultEditor != "" {
+					os.Setenv("EDITOR", m.config.DefaultEditor)
+				}
 				m.form = m.newImportScriptForm()
 				return m, m.form.Init()
 			case "c":
@@ -245,28 +256,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.form = m.newAliasForm()
 						return m, m.form.Init()
 					} else {
-						// Scripts use external editor
-						// Using m.config.DefaultEditor
-						editor := m.config.DefaultEditor
-						if editor == "" {
-							editor = "nano" // Fallback
-						}
-
-						if meta.FilePath == "" {
-							m.status = "Error: File path missing for script"
+						// Scripts use internal form now (as requested)
+						content, err := m.store.GetScriptContent(meta)
+						if err != nil {
+							m.status = fmt.Sprintf("Error reading content: %v", err)
 							return m, nil
 						}
 
-						c := tea.ExecProcess(exec.Command(editor, meta.FilePath), func(err error) tea.Msg {
-							// Reload items after edit? Content might change but metadata?
-							// Metadata might change if they edit metadata.json manually but usually just script.
-							// We can just return nil or reload.
-							if err != nil {
-								return fmt.Errorf("editor finished with error: %v", err)
-							}
-							return nil
-						})
-						return m, c
+						m.state = stateForm
+						m.formData = &formData{
+							mode:         "edit",
+							name:         meta.Name,
+							description:  meta.Desc,
+							itemType:     "script", // or string(meta.Type)
+							scriptType:   string(meta.ScriptType),
+							content:      content,
+							requiresSudo: meta.RequiresSudo,
+							usesParams:   meta.UsesParams,
+						}
+						// Use CreateScriptForm which has all fields (desc, type, etc)
+						if m.config.DefaultEditor != "" {
+							os.Setenv("EDITOR", m.config.DefaultEditor)
+						}
+						m.activeFormID = "edit_script"
+						m.form = m.newFullScriptForm()
+						return m, m.form.Init()
 					}
 				}
 
@@ -315,6 +329,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.form = m.newAdvancedRunForm()
 					return m, m.form.Init()
 				}
+			case "s":
+				// Cycle sort order: name -> type -> lastrun -> name
+				switch m.config.SortOrder {
+				case "name":
+					m.config.SortOrder = "type"
+				case "type":
+					m.config.SortOrder = "lastrun"
+				case "lastrun":
+					m.config.SortOrder = "name"
+				default:
+					m.config.SortOrder = "name"
+				}
+
+				// Save config
+				// We need to access the config package SaveConfig, but m.config is a struct instance.
+				// We might need to import config package or assume we can save it.
+				// config.SaveConfig(&m.config)
+				// Wait, m.config IS *config.Config (pointer) or Config (struct)?
+				// In model.go it is likely *config.Config or we need to check.
+				// Update.go imports "github.com/jurekzsl/vellum/internal/config" ?
+				// Checking imports of update.go...
+				// It imports "github.com/jurekzsl/vellum/internal/runner" and model etc.
+				// Needs "github.com/jurekzsl/vellum/internal/config" import?
+				// Model struct likely has Config.
+				// Let's assume m.config is accessible.
+
+				if err := config.SaveConfig(m.config); err != nil {
+					m.status = fmt.Sprintf("Error saving config: %v", err)
+				} else {
+					// m.status = fmt.Sprintf("Sorted by %s", m.config.SortOrder) // Removed as per user request
+					// Reload items to apply sort
+					cmds = append(cmds, loadItems(m.store))
+				}
+				return m, tea.Batch(cmds...)
 			}
 		}
 	}
@@ -331,6 +379,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.form.State == huh.StateCompleted {
+			// Handle transitions for multi-step forms
+			if m.activeFormID == "create_meta" {
+				// Inject shebang if .sh
+				if m.formData.scriptType == ".sh" && m.formData.content == "" {
+					m.formData.content = fmt.Sprintf("#!%s\n\n", m.config.DefaultShell)
+				}
+				m.activeFormID = "create_content"
+				if m.config.DefaultEditor != "" {
+					os.Setenv("EDITOR", m.config.DefaultEditor)
+				}
+				m.form = m.newCreateScriptContentForm()
+				// Init new form
+				cmds = append(cmds, m.form.Init())
+				return m, tea.Batch(cmds...)
+			}
+
 			// Process form data
 			pCmd, err := m.processForm()
 			if err != nil {
@@ -363,15 +427,15 @@ func (m *Model) updateListHeight() {
 	lh, _ := listStyle.GetFrameSize() // Use only width overhead
 
 	// Estimated overhead:
-	// Logo: ~6 lines (with margins)
-	// Search: ~4 lines
-	// Header: ~2 lines
-	// Footer: ~3 lines
-	// Padding: ~2 lines
-	// Total overhead ~ 17-19 lines.
-	// We use 19 to be safe.
-	// We use 16 to be safe (reduced from 19).
-	overhead := 16
+	// Estimated overhead:
+	// Logo: 5 lines (4 text + 1 margin)
+	// Search: 4 lines (1 text + 2 border + 1 margin)
+	// Header: 3 lines (1 text + 1 border + 1 margin)
+	// Footer: 4 lines (2 blocks * (1 text + 1 margin))
+	// List Wrapper: 2 lines (borders)
+	// Total overhead ~ 18 lines.
+	// We use 20 to be safe and prevent scrolling/duplication.
+	overhead := 20
 
 	// Available height for the list frame (including border)
 	// listStyle usually adds border (2 lines).
@@ -411,6 +475,10 @@ func (m *Model) updateListHeight() {
 
 func (m *Model) processForm() (tea.Cmd, error) {
 	if m.formData.mode == "create" || m.formData.mode == "edit" {
+		if strings.TrimSpace(m.formData.name) == "" {
+			return nil, fmt.Errorf("name is required")
+		}
+
 		if m.formData.itemType == "script" || m.formData.itemType == string(model.TypeScript) {
 			meta := model.Metadata{
 				ID:           strings.ToLower(m.formData.name),
@@ -438,6 +506,9 @@ func (m *Model) processForm() (tea.Cmd, error) {
 			return nil, m.store.AddAliasToShell(meta)
 		}
 	} else if m.formData.mode == "import" {
+		if strings.TrimSpace(m.formData.name) == "" {
+			return nil, fmt.Errorf("name is required")
+		}
 		content, err := os.ReadFile(m.formData.filePath)
 		if err != nil {
 			return nil, fmt.Errorf("read file failed: %w", err)
@@ -453,6 +524,9 @@ func (m *Model) processForm() (tea.Cmd, error) {
 		}
 		return nil, m.store.SaveScript(meta, string(content))
 	} else if m.formData.mode == "alias" {
+		if strings.TrimSpace(m.formData.name) == "" {
+			return nil, fmt.Errorf("name is required")
+		}
 		meta := model.Metadata{
 			ID:           strings.ToLower(m.formData.name),
 			Name:         m.formData.name,
@@ -559,7 +633,7 @@ func (m *Model) processForm() (tea.Cmd, error) {
 
 // Form Builders
 
-func (m *Model) newCreateScriptForm() *huh.Form {
+func (m *Model) newCreateScriptMetaForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().Title("Name").Value(&m.formData.name),
@@ -572,8 +646,34 @@ func (m *Model) newCreateScriptForm() *huh.Form {
 					huh.NewOption("Go", ".go"),
 					huh.NewOption("JavaScript", ".js"),
 				).Value(&m.formData.scriptType),
-			huh.NewText().Title("Script Content").Value(&m.formData.content),
 			huh.NewConfirm().Title("Requires Sudo?").Value(&m.formData.requiresSudo),
+		),
+	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
+}
+
+func (m *Model) newFullScriptForm() *huh.Form {
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().Title("Name").Value(&m.formData.name),
+			huh.NewInput().Title("Description").Value(&m.formData.description),
+			huh.NewSelect[string]().
+				Title("Type").
+				Options(
+					huh.NewOption("Python", ".py"),
+					huh.NewOption("Bash", ".sh"),
+					huh.NewOption("Go", ".go"),
+					huh.NewOption("JavaScript", ".js"),
+				).Value(&m.formData.scriptType),
+			huh.NewConfirm().Title("Requires Sudo?").Value(&m.formData.requiresSudo),
+			huh.NewText().Title("Script Content").Value(&m.formData.content),
+		),
+	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
+}
+
+func (m *Model) newCreateScriptContentForm() *huh.Form {
+	return huh.NewForm(
+		huh.NewGroup(
+			huh.NewText().Title("Script Content").Value(&m.formData.content),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
 }

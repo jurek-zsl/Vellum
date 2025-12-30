@@ -230,6 +230,10 @@ func (s *Store) loadMetadata(path string) (model.Metadata, error) {
 }
 
 func (s *Store) SaveScript(meta model.Metadata, content string) error {
+	if meta.Name == "" {
+		return fmt.Errorf("script name cannot be empty")
+	}
+
 	// Create folder
 	dir := filepath.Join(s.cfg.VellumDir, "scripts", meta.Name)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -253,6 +257,10 @@ func (s *Store) SaveScript(meta model.Metadata, content string) error {
 }
 
 func (s *Store) SaveAlias(meta model.Metadata) error {
+	if meta.Name == "" {
+		return fmt.Errorf("alias name cannot be empty")
+	}
+
 	dir := filepath.Join(s.cfg.VellumDir, "aliases", meta.Name)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err

@@ -17,7 +17,7 @@ func (m Model) View() string {
 
 	if m.state == stateForm {
 		// Form View
-		content = listStyle.Width(m.list.Width()).Render(m.form.View())
+		content = listStyle.Width(m.list.Width()).Render(m.form.WithWidth(m.list.Width()).View())
 
 		// Footer
 		currentFooter = footerStyle.Render(m.getFormFooter())
@@ -39,7 +39,7 @@ func (m Model) View() string {
 			width = 80
 		}
 
-		typeWidth := 5
+		typeWidth := 10
 		lastRunWidth := 15
 		gap := 2
 		totalGap := gap * 3
@@ -50,11 +50,26 @@ func (m Model) View() string {
 		nameWidth := int(float64(remaining) * 0.3)
 		cmdWidth := remaining - nameWidth
 
+		// Define headers with sort indicators
+		nameH := "Name"
+		typeH := "Type"
+		descH := "Description"
+		runH := "Last Run"
+
+		switch m.config.SortOrder {
+		case "name":
+			nameH += " ▼"
+		case "type":
+			typeH += " ▼"
+		case "lastrun":
+			runH += " ▼"
+		}
+
 		header := tableHeaderStyle.Render(fmt.Sprintf("%s  %s  %s  %s",
-			pad("Name", nameWidth),
-			pad("Type", typeWidth),
-			pad("Description", cmdWidth),
-			pad("Last Run", lastRunWidth),
+			pad(nameH, nameWidth),
+			pad(typeH, typeWidth),
+			pad(descH, cmdWidth),
+			pad(runH, lastRunWidth),
 		))
 
 		// List Content
@@ -73,7 +88,7 @@ func (m Model) View() string {
 		)
 
 		moreFooter := fmt.Sprintf(
-			"%s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s",
+			"%s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s",
 			keyStyle.Render("a"), descStyle.Render("add"),
 			keyStyle.Render("i"), descStyle.Render("import"),
 			keyStyle.Render("l"), descStyle.Render("alias"),
@@ -82,6 +97,7 @@ func (m Model) View() string {
 			keyStyle.Render("c"), descStyle.Render("copy"),
 			keyStyle.Render("r"), descStyle.Render("adv run"),
 			keyStyle.Render("o"), descStyle.Render("open"),
+			keyStyle.Render("s"), descStyle.Render("sort"),
 			keyStyle.Render("q"), descStyle.Render("quit"),
 		)
 
@@ -135,7 +151,7 @@ func (m Model) getFormFooter() string {
 
 	if isScriptForm {
 		keys = append(keys,
-			render("alt+enter", "new line"),
+			render("ctrl+]", "new line"),
 			render("ctrl+e", "editor"),
 		)
 	}
@@ -147,8 +163,18 @@ func (m Model) getFormFooter() string {
 }
 
 func pad(s string, w int) string {
-	if len(s) > w {
-		return s[:w]
+	l := lipgloss.Width(s)
+	if l > w {
+		// Truncate based on runes? Or just lipgloss.Style.MaxWidth?
+		// Simple truncation might break unicode.
+		// For now assume s fits or truncate naively but lipgloss.Width handles ansi/unicode width logic?
+		// No, we need to substring.
+		// Let's rely on lipgloss constraints or simple rune slice.
+		r := []rune(s)
+		if len(r) > w {
+			return string(r[:w])
+		}
+		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-l)
 }
