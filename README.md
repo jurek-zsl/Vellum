@@ -49,8 +49,9 @@ vellum
 ### Keybindings
 
 - **Navigation**: Arrow keys (`↑`, `↓`)
-- **Filter/Search**: Type to filter
+- **Filter/Search**: Focus on filter bar (`/`)
 - **`enter`**: Run selected script/alias
+- **`r`**: Run scipt/alias with advanced options
 - **`a`**: Create new script
 - **`i`**: Import existing script
 - **`l`**: Add new alias
@@ -58,7 +59,7 @@ vellum
 - **`d`**: Delete selected script/alias
 - **`c`**: Copy Script or Alias to clipboard
 - **`o`**: Open Script or Alias subfolder in Explorer
-- **`h`**: Toggle help menu
+- **`s`**: Cycle through sorting modes
 - **`q`**: Quit
 
 ## Directory Structure
