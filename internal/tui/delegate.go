@@ -9,106 +9,113 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/jurekzsl/vellum/internal/model"
+	"github.com/mattn/go-runewidth"
 )
 
 type itemDelegate struct{}
 
-func (d itemDelegate) Height() int { return 1 }
-
-func (d itemDelegate) Spacing() int { return 0 }
-
-func (d itemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd {
-	return nil
-}
+func (d itemDelegate) Height() int                             { return 1 }
+func (d itemDelegate) Spacing() int                            { return 0 }
+func (d itemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
 
 func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
-	str, ok := listItem.(model.Metadata)
+	meta, ok := listItem.(model.Metadata)
 	if !ok {
 		return
 	}
 
-	fn := itemStyle.Render
-	if index == m.Index() {
-		fn = func(s ...string) string {
-			return selectedItemStyle.Render(strings.Join(s, " "))
-		}
-	}
-
-	var typeIcon string
-	if str.Type == model.TypeAlias {
-		typeIcon = "A" // Alias
-	} else {
-		typeIcon = "S" // Script
-	}
-
-	// Calculate widths
 	width := m.Width()
 	if width <= 0 {
-		width = 80 // Fallback
+		width = 80
 	}
 
-	// subtract padding (itemStyle has Left 4) - verify if this is included or excluded from m.Width().
-	// m.Width() is usually the content width if SetSize set the frame size correctly.
-	// However, let's keep it safe.
-
-	// Fixed columns
-	typeWidth := 5
-	lastRunWidth := 15
-	gap := 2
-	totalGap := gap * 3
-
-	remaining := width - typeWidth - lastRunWidth - totalGap - 6 // -4 for padding + 2 extra for safety
-	if remaining < 10 {
-		remaining = 10
+	// Dynamic Width Calculation based on shared geometry constants
+	totalGap := ColGap * 3
+	available := width - ColTypeWidth - ColLastRunWidth - totalGap - 6
+	if available < 20 {
+		available = 20
 	}
 
-	nameWidth := int(float64(remaining) * 0.3)
-	cmdWidth := remaining - nameWidth
-
-	name := truncate(str.Name, nameWidth)
-	details := truncate(str.Command, cmdWidth)
-	if str.Desc != "" {
-		details = truncate(str.Desc, cmdWidth)
+	nameWidth := int(float64(available) * 0.35)
+	if nameWidth < 8 {
+		nameWidth = 8
 	}
+	descWidth := available - nameWidth
+	if descWidth < 10 {
+		descWidth = 10
+	}
+
+	typeBadge := "[SCR]"
+	if meta.Type == model.TypeAlias {
+		typeBadge = "[ALS]"
+	}
+
+	name := truncateRunes(meta.Name, nameWidth)
+	desc := meta.Desc
+	if desc == "" {
+		desc = meta.Command
+	}
+	desc = truncateRunes(desc, descWidth)
 
 	lastRun := "Never"
-	if !str.LastRunAt.IsZero() {
-		lastRun = timeSince(str.LastRunAt)
-	}
-
-	// Helper to ensure fixed width
-	pad := func(s string, w int) string {
-		if len(s) > w {
-			return s[:w]
+	if !meta.LastRunAt.IsZero() {
+		lastRun = timeSince(meta.LastRunAt)
+		if meta.LastExitCode != 0 {
+			lastRun += fmt.Sprintf(" (!%d)", meta.LastExitCode)
 		}
-		return s + strings.Repeat(" ", w-len(s))
 	}
+	lastRun = truncateRunes(lastRun, ColLastRunWidth)
 
-	row := fmt.Sprintf("%s  %s  %s  %s",
-		pad(name, nameWidth),
-		pad(typeIcon, typeWidth),
-		pad(details, cmdWidth),
-		pad(lastRun, lastRunWidth),
+	row := fmt.Sprintf("%s%s%s%s%s%s%s",
+		padRunes(name, nameWidth),
+		strings.Repeat(" ", ColGap),
+		padRunes(typeBadge, ColTypeWidth),
+		strings.Repeat(" ", ColGap),
+		padRunes(desc, descWidth),
+		strings.Repeat(" ", ColGap),
+		padRunes(lastRun, ColLastRunWidth),
 	)
 
-	fmt.Fprint(w, fn(row))
+	if index == m.Index() {
+		fmt.Fprint(w, selectedItemStyle.Render(row))
+	} else {
+		fmt.Fprint(w, itemStyle.Render(row))
+	}
 }
 
-func truncate(s string, max int) string {
-	if len(s) > max {
-		return s[:max-3] + "..."
+func truncateRunes(s string, maxCells int) string {
+	if maxCells <= 3 {
+		return runewidth.Truncate(s, maxCells, "")
+	}
+	if runewidth.StringWidth(s) > maxCells {
+		return runewidth.Truncate(s, maxCells-3, "") + "..."
 	}
 	return s
 }
 
+func padRunes(s string, targetCells int) string {
+	sw := runewidth.StringWidth(s)
+	if sw > targetCells {
+		return truncateRunes(s, targetCells)
+	}
+	return s + strings.Repeat(" ", targetCells-sw)
+}
+
 func timeSince(t time.Time) string {
 	d := time.Since(t)
+	if d < 1*time.Minute {
+		return "Just now"
+	}
+	if d < 1*time.Hour {
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	}
 	if d < 24*time.Hour {
-		return "Today"
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	}
 	if d < 48*time.Hour {
 		return "Yesterday"
 	}
 	days := int(d.Hours() / 24)
-	return fmt.Sprintf("%d days ago", days)
+	return fmt.Sprintf("%dd ago", days)
 }
+

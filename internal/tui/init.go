@@ -9,15 +9,26 @@ import (
 type itemsLoadedMsg []model.Metadata
 
 func (m Model) Init() tea.Cmd {
-	return loadItems(m.store)
+	return tea.Batch(
+		loadItems(m.store),
+		cleanLogsCmd(m.store),
+	)
 }
 
 func loadItems(s *store.Store) tea.Cmd {
 	return func() tea.Msg {
 		items, err := s.ListItems()
 		if err != nil {
-			return nil // Handle error msg?
+			return itemsLoadedMsg{}
 		}
 		return itemsLoadedMsg(items)
 	}
 }
+
+func cleanLogsCmd(s *store.Store) tea.Cmd {
+	return func() tea.Msg {
+		s.CleanLogs()
+		return nil
+	}
+}
+

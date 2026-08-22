@@ -9,23 +9,82 @@ import (
 )
 
 func (m Model) View() string {
-	// Logo is always shown
 	logoView := logoStyle.Render(logo)
 
 	var content string
 	var currentFooter string
 
-	if m.state == stateForm {
-		// Form View
-		content = listStyle.Width(m.list.Width()).Render(m.form.WithWidth(m.list.Width()).View())
+	switch m.state {
+	case stateForm:
+		width := m.list.Width()
+		if width <= 0 {
+			width = 80
+		}
+		formTitle := " Form"
+		switch m.activeFormID {
+		case "create_meta":
+			formTitle = " Create New Script (Step 1/2: Metadata)"
+		case "create_content":
+			formTitle = fmt.Sprintf(" Create New Script (Step 2/2: %s Content)", m.formData.scriptType)
+		case "edit_script":
+			formTitle = fmt.Sprintf(" Edit Script: %s (%s)", m.formData.name, m.formData.scriptType)
+		case "alias":
+			formTitle = " Create New Shell Alias"
+		case "import":
+			formTitle = " Import Existing Script File"
+		case "exec_advanced":
+			formTitle = fmt.Sprintf(" Advanced Execution: %s", m.formData.name)
+		case "delete":
+			formTitle = fmt.Sprintf(" Confirm Deletion: %s", m.formData.name)
+		}
 
-		// Footer
+		header := logHeaderStyle.Width(width).Render(formTitle)
+		content = lipgloss.JoinVertical(lipgloss.Left,
+			header,
+			listStyle.Width(width).Render(m.form.WithWidth(width - 4).View()),
+		)
 		currentFooter = footerStyle.Render(m.getFormFooter())
 
-	} else {
-		// List View
+	case stateLogView:
+		// Log Viewer View
+		width := m.list.Width()
+		if width <= 0 {
+			width = 80
+		}
 
-		// Search Bar
+		headerText := fmt.Sprintf("Logs for: %s", m.currentLogMeta.Name)
+		if len(m.logFiles) > 0 {
+			headerText += fmt.Sprintf(" (%d of %d: %s)", m.currentLogIdx+1, len(m.logFiles), m.logFiles[m.currentLogIdx])
+		} else {
+			headerText += " (No logs recorded yet)"
+		}
+
+		statusBadge := ""
+		if !m.currentLogMeta.LastRunAt.IsZero() {
+			if m.currentLogMeta.LastExitCode == 0 {
+				statusBadge = logSuccessBadge.Render(fmt.Sprintf(" [EXIT 0 | %dms]", m.currentLogMeta.LastDurationMs))
+			} else {
+				statusBadge = logFailBadge.Render(fmt.Sprintf(" [EXIT %d | %dms]", m.currentLogMeta.LastExitCode, m.currentLogMeta.LastDurationMs))
+			}
+		}
+
+		header := logHeaderStyle.Width(width).Render(headerText + statusBadge)
+		content = lipgloss.JoinVertical(lipgloss.Left,
+			header,
+			listStyle.Width(width).Render(m.logViewport.View()),
+		)
+
+		logFooterLinks := fmt.Sprintf(
+			"%s • %s • %s • %s • %s",
+			fmt.Sprintf("%s %s", keyStyle.Render("↑/↓/pgup/pgdn"), descStyle.Render("scroll")),
+			fmt.Sprintf("%s %s", keyStyle.Render("n/p"), descStyle.Render("next/prev log")),
+			fmt.Sprintf("%s %s", keyStyle.Render("c"), descStyle.Render("copy log")),
+			fmt.Sprintf("%s %s", keyStyle.Render("g/G"), descStyle.Render("top/bottom")),
+			fmt.Sprintf("%s %s", keyStyle.Render("esc/q"), descStyle.Render("back to list")),
+		)
+		currentFooter = footerStyle.Render(logFooterLinks)
+
+	default: // stateList
 		var searchView string
 		if m.searchInput.Focused() {
 			searchView = searchFocusStyle.Render(m.searchInput.View())
@@ -33,24 +92,25 @@ func (m Model) View() string {
 			searchView = searchStyle.Render(m.searchInput.View())
 		}
 
-		// Table Header
 		width := m.list.Width()
 		if width <= 0 {
 			width = 80
 		}
 
-		typeWidth := 10
-		lastRunWidth := 15
-		gap := 2
-		totalGap := gap * 3
-		remaining := width - typeWidth - lastRunWidth - totalGap - 4 // Match delegate padding logic
-		if remaining < 10 {
-			remaining = 10
+		totalGap := ColGap * 3
+		available := width - ColTypeWidth - ColLastRunWidth - totalGap - 6
+		if available < 20 {
+			available = 20
 		}
-		nameWidth := int(float64(remaining) * 0.3)
-		cmdWidth := remaining - nameWidth
+		nameWidth := int(float64(available) * 0.35)
+		if nameWidth < 8 {
+			nameWidth = 8
+		}
+		descWidth := available - nameWidth
+		if descWidth < 10 {
+			descWidth = 10
+		}
 
-		// Define headers with sort indicators
 		nameH := "Name"
 		typeH := "Type"
 		descH := "Description"
@@ -65,30 +125,32 @@ func (m Model) View() string {
 			runH += " ▼"
 		}
 
-		header := tableHeaderStyle.Render(fmt.Sprintf("%s  %s  %s  %s",
-			pad(nameH, nameWidth),
-			pad(typeH, typeWidth),
-			pad(descH, cmdWidth),
-			pad(runH, lastRunWidth),
+		header := tableHeaderStyle.Render(fmt.Sprintf("%s%s%s%s%s%s%s",
+			padRunes(nameH, nameWidth),
+			strings.Repeat(" ", ColGap),
+			padRunes(typeH, ColTypeWidth),
+			strings.Repeat(" ", ColGap),
+			padRunes(descH, descWidth),
+			strings.Repeat(" ", ColGap),
+			padRunes(runH, ColLastRunWidth),
 		))
 
-		// List Content
 		content = lipgloss.JoinVertical(lipgloss.Left,
 			searchView,
 			header,
 			listStyle.Width(m.list.Width()).Render(m.list.View()),
 		)
 
-		// List Footer
 		footerLinks := fmt.Sprintf(
-			"%s • %s • %s",
+			"%s • %s • %s • %s",
 			fmt.Sprintf("%s %s", keyStyle.Render("↑/↓"), descStyle.Render("navigate")),
 			fmt.Sprintf("%s %s", keyStyle.Render("/"), descStyle.Render("search")),
 			fmt.Sprintf("%s %s", keyStyle.Render("enter"), descStyle.Render("run")),
+			fmt.Sprintf("%s %s", keyStyle.Render("v"), descStyle.Render("view logs")),
 		)
 
 		moreFooter := fmt.Sprintf(
-			"%s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s",
+			"%s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s • %s %s",
 			keyStyle.Render("a"), descStyle.Render("add"),
 			keyStyle.Render("i"), descStyle.Render("import"),
 			keyStyle.Render("l"), descStyle.Render("alias"),
@@ -96,6 +158,7 @@ func (m Model) View() string {
 			keyStyle.Render("d"), descStyle.Render("del"),
 			keyStyle.Render("c"), descStyle.Render("copy"),
 			keyStyle.Render("r"), descStyle.Render("adv run"),
+			keyStyle.Render("x"), descStyle.Render("export"),
 			keyStyle.Render("o"), descStyle.Render("open"),
 			keyStyle.Render("s"), descStyle.Render("sort"),
 			keyStyle.Render("q"), descStyle.Render("quit"),
@@ -125,27 +188,21 @@ func (m Model) getFormFooter() string {
 		return ""
 	}
 
-	// Helper to render "key desc" pair
 	render := func(key, desc string) string {
 		return fmt.Sprintf("%s %s", keyStyle.Render(key), descStyle.Render(desc))
 	}
 
 	var keys []string
 
-	// Arrows only relevant if we have multiple fields or select/text elements
-	// Delete confirmation is single field (Left/Right to toggle), so arrows don't "navigate" focus.
 	if m.formData.mode != "delete" {
 		keys = append(keys, render("↑/↓", "navigate"))
 	}
 
-	// Common navigation
 	keys = append(keys,
 		render("tab", "next"),
 		render("shift+tab", "back"),
 	)
 
-	// Contextual help based on form mode/type
-	// Create/Edit Script (Has Textarea)
 	isScriptForm := (m.formData.mode == "create" || m.formData.mode == "edit") &&
 		(m.formData.itemType == "script" || m.formData.itemType == string(model.TypeScript))
 
@@ -157,24 +214,6 @@ func (m Model) getFormFooter() string {
 	}
 
 	keys = append(keys, render("esc", "cancel"))
-
-	// Join with bullet
 	return strings.Join(keys, " • ")
 }
 
-func pad(s string, w int) string {
-	l := lipgloss.Width(s)
-	if l > w {
-		// Truncate based on runes? Or just lipgloss.Style.MaxWidth?
-		// Simple truncation might break unicode.
-		// For now assume s fits or truncate naively but lipgloss.Width handles ansi/unicode width logic?
-		// No, we need to substring.
-		// Let's rely on lipgloss constraints or simple rune slice.
-		r := []rune(s)
-		if len(r) > w {
-			return string(r[:w])
-		}
-		return s
-	}
-	return s + strings.Repeat(" ", w-l)
-}

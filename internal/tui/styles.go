@@ -134,6 +134,27 @@ var (
 				BorderForeground(lipgloss.Color("#BD93F9")).
 				PaddingLeft(4).
 				MarginBottom(1)
+
+	// Log View styles
+	logHeaderStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#44475A")).
+			Padding(0, 1).
+			Bold(true)
+
+	logSuccessBadge = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#50FA7B")).
+			Bold(true)
+
+	logFailBadge = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FF5555")).
+			Bold(true)
+)
+
+const (
+	ColTypeWidth    = 6
+	ColLastRunWidth = 14
+	ColGap          = 2
 )
 
 func UpdateStyles(color string) {
@@ -150,3 +171,4 @@ const logo = "   _____     _ _           \n" +
 	"  |  |  |___| | |_ _ _____ \n" +
 	"  |  |  | -_| | | | |     |\n" +
 	"   \\___/|___|_|_|___|_|_|_|"
+

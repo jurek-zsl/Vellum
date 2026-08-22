@@ -6,15 +6,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
-	// ... (imports need to be handled carefully, I will add os/exec to imports in a separate small edit if ReplaceFileContent doesn't support adding it easily, but here I can try replacing the import block or just assume it is there? wait I can't assume. Update.go already has "os", not "os/exec". I need to add it.)
-	// Let's replace the import block first to be safe, then the handler.
-	// Actually, I'll do the handler logic here and rely on the fact that I can edit imports separately or if I include imports in replacement it might work if I match enough context.
-	// I will edit imports first.
-
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
@@ -23,8 +17,27 @@ import (
 	"github.com/jurekzsl/vellum/internal/runner"
 )
 
+type execFinishedMsg struct {
+	meta       model.Metadata
+	exitCode   int
+	durationMs int64
+	err        error
+}
+
+type delayedExecMsg struct {
+	cmdObj     *exec.Cmd
+	logFile    *os.File
+	meta       model.Metadata
+	copyOutput bool
+}
+
+type copyResultMsg struct {
+	status string
+	err    error
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Key Translation
+	// Key translation for text inputs in Huh forms
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && m.state == stateForm {
 		if keyMsg.String() == "ctrl+]" {
 			msg = tea.KeyMsg{Type: tea.KeyEnter, Alt: true}
@@ -37,13 +50,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h, _ := appStyle.GetFrameSize()
-
-		// List border/padding
 		lh, _ := listStyle.GetFrameSize()
 
 		m.width = msg.Width
 		m.height = msg.Height
-		m.searchInput.Width = msg.Width - h - lh - 4 // Adjust search width
+		m.searchInput.Width = msg.Width - h - lh - 4
+
+		// Resize viewport
+		vpWidth := m.width - h - lh
+		if vpWidth < 20 {
+			vpWidth = 20
+		}
+		vpHeight := m.height - 10
+		if vpHeight < 5 {
+			vpHeight = 5
+		}
+		m.logViewport.Width = vpWidth
+		m.logViewport.Height = vpHeight
+
 		m.updateListHeight()
 
 	case itemsLoadedMsg:
@@ -55,8 +79,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.list.SetItems(items))
 		m.updateListHeight()
 
+	case execFinishedMsg:
+		_ = m.store.UpdateExecution(msg.meta, msg.exitCode, msg.durationMs)
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Finished with error (Exit %d in %dms): %v", msg.exitCode, msg.durationMs, msg.err)
+		} else {
+			m.status = fmt.Sprintf("Completed successfully (Exit 0 in %dms)", msg.durationMs)
+		}
+		cmds = append(cmds, loadItems(m.store))
+
+	case delayedExecMsg:
+		return m, m.runCommandWithTea(msg.cmdObj, msg.logFile, msg.meta, msg.copyOutput)
+
+	case copyResultMsg:
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Clipboard error: %v", msg.err)
+		} else {
+			m.status = msg.status
+		}
+
 	case tea.KeyMsg:
-		// If form is active, it handles keys
+		// 1. Handle Log View State Keybindings
+		if m.state == stateLogView {
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateList
+				m.status = ""
+				return m, nil
+
+			case "n", "]", "tab":
+				// Next (older) log
+				if len(m.logFiles) > 0 && m.currentLogIdx < len(m.logFiles)-1 {
+					m.currentLogIdx++
+					m.loadLogContent()
+				}
+				return m, nil
+
+			case "p", "[", "shift+tab":
+				// Previous (newer) log
+				if len(m.logFiles) > 0 && m.currentLogIdx > 0 {
+					m.currentLogIdx--
+					m.loadLogContent()
+				}
+				return m, nil
+
+			case "c":
+				if m.logContent != "" {
+					return m, copyToClipboardCmd(m.logContent, "Log content copied to clipboard")
+				}
+				return m, nil
+
+			case "g", "home":
+				m.logViewport.GotoTop()
+				return m, nil
+
+			case "G", "end":
+				m.logViewport.GotoBottom()
+				return m, nil
+
+			default:
+				m.logViewport, cmd = m.logViewport.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// 2. Handle Form State Keybindings
 		if m.state == stateForm {
 			if msg.String() == "esc" {
 				m.state = stateList
@@ -68,7 +155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 
-		// Search Input Handling
+		// 3. Handle Search Input Focused Keybindings
 		if m.searchInput.Focused() {
 			switch msg.String() {
 			case "enter", "down":
@@ -82,33 +169,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 
 				// Filter logic
-				val := m.searchInput.Value()
+				val := strings.TrimSpace(m.searchInput.Value())
 				var filtered []list.Item
 				if val == "" {
 					filtered = m.allItems
 				} else {
+					lowerVal := strings.ToLower(val)
+					isScriptFilter := strings.Contains(lowerVal, "#s")
+					isAliasFilter := strings.Contains(lowerVal, "#a")
+					cleanVal := strings.ReplaceAll(strings.ReplaceAll(lowerVal, "#s", ""), "#a", "")
+					cleanVal = strings.TrimSpace(cleanVal)
+
 					for _, item := range m.allItems {
 						if meta, ok := item.(model.Metadata); ok {
-							matches := false
-
-							// Special tags
-							if strings.Contains(val, "#S") || strings.Contains(val, "#s") {
-								if meta.Type == model.TypeScript {
-									matches = true
-								}
-							} else if strings.Contains(val, "#A") || strings.Contains(val, "#a") {
-								if meta.Type == model.TypeAlias {
-									matches = true
-								}
-							} else {
-								// Normal search
-								if strings.Contains(strings.ToLower(meta.Name), strings.ToLower(val)) ||
-									strings.Contains(strings.ToLower(meta.Command), strings.ToLower(val)) {
-									matches = true
-								}
+							if isScriptFilter && meta.Type != model.TypeScript {
+								continue
+							}
+							if isAliasFilter && meta.Type != model.TypeAlias {
+								continue
 							}
 
-							if matches {
+							if cleanVal == "" ||
+								strings.Contains(strings.ToLower(meta.Name), cleanVal) ||
+								strings.Contains(strings.ToLower(meta.Desc), cleanVal) ||
+								strings.Contains(strings.ToLower(meta.Command), cleanVal) {
 								filtered = append(filtered, item)
 							}
 						}
@@ -120,26 +204,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Key bindings when list is focused
-		switch msg.String() {
-		case "/":
-			m.searchInput.Focus()
-			return m, textinput.Blink
-		}
-
-		// Fallthrough only if not caught above
+		// 4. Handle List State Global Keybindings
 		if m.state == stateList {
 			switch msg.String() {
 			case "ctrl+c", "q":
-				if !m.searchInput.Focused() {
-					return m, tea.Quit
+				return m, tea.Quit
+
+			case "/":
+				m.searchInput.Focus()
+				return m, textinput.Blink
+
+			case "v", "V":
+				if i := m.list.SelectedItem(); i != nil {
+					meta := i.(model.Metadata)
+					m.currentLogMeta = meta
+					logs, err := m.store.ListLogs(meta)
+					if err != nil {
+						m.status = fmt.Sprintf("Error reading logs: %v", err)
+						return m, nil
+					}
+					m.logFiles = logs
+					m.currentLogIdx = 0
+					m.state = stateLogView
+					m.loadLogContent()
+					return m, nil
 				}
+
+			case "x", "X":
+				exportMD, err := m.store.ExportMarkdown()
+				if err != nil {
+					m.status = fmt.Sprintf("Export error: %v", err)
+					return m, nil
+				}
+				exportPath := filepath.Join(m.config.VellumDir, fmt.Sprintf("vellum_export_%s.md", time.Now().Format("2006-01-02_150405")))
+				if wErr := os.WriteFile(exportPath, []byte(exportMD), 0600); wErr != nil {
+					m.status = fmt.Sprintf("Error writing export: %v", wErr)
+					return m, nil
+				}
+				return m, copyToClipboardCmd(exportMD, fmt.Sprintf("Exported to %s and copied to clipboard", exportPath))
+
 			case "a":
 				m.state = stateForm
 				m.formData = &formData{mode: "create", itemType: "script"}
-				if m.config.DefaultEditor != "" {
-					os.Setenv("EDITOR", m.config.DefaultEditor)
-				}
 				m.activeFormID = "create_meta"
 				m.form = m.newCreateScriptMetaForm()
 				return m, m.form.Init()
@@ -147,11 +253,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "i":
 				m.state = stateForm
 				m.formData = &formData{mode: "import", itemType: "script"}
-				if m.config.DefaultEditor != "" {
-					os.Setenv("EDITOR", m.config.DefaultEditor)
-				}
 				m.form = m.newImportScriptForm()
 				return m, m.form.Init()
+
 			case "c":
 				if i := m.list.SelectedItem(); i != nil {
 					meta := i.(model.Metadata)
@@ -166,52 +270,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						content = meta.Command
 					}
-
-					// Try pbcopy (mac) first, then xclip/wl-copy
-					// Since we know user is on mac, pbcopy is primary.
-					// We'll try a generic approach if possible or just hardcode for Mac as user requested Mac support primarily.
-					// Implementation: execute command and write to stdin.
-
-					var copyCmd *exec.Cmd
-					if _, err := exec.LookPath("pbcopy"); err == nil {
-						copyCmd = exec.Command("pbcopy")
-					} else if _, err := exec.LookPath("wl-copy"); err == nil {
-						copyCmd = exec.Command("wl-copy")
-					} else if _, err := exec.LookPath("xclip"); err == nil {
-						copyCmd = exec.Command("xclip", "-selection", "clipboard")
-					} else {
-						m.status = "No clipboard tool found (pbcopy/wl-copy/xclip)"
-						return m, nil
-					}
-
-					in, err := copyCmd.StdinPipe()
-					if err != nil {
-						m.status = fmt.Sprintf("Error creating stdin pipe: %v", err)
-						return m, nil
-					}
-
-					if err := copyCmd.Start(); err != nil {
-						m.status = fmt.Sprintf("Error starting clipboard cmd: %v", err)
-						return m, nil
-					}
-
-					go func() {
-						defer in.Close()
-						in.Write([]byte(content))
-					}()
-
-					if err := copyCmd.Wait(); err != nil {
-						m.status = fmt.Sprintf("Clipboard error: %v", err)
-					} else {
-						m.status = "Copied to clipboard"
-					}
-					return m, nil
+					return m, copyToClipboardCmd(content, "Copied to clipboard")
 				}
+
 			case "l":
 				m.state = stateForm
 				m.formData = &formData{mode: "alias", itemType: "alias"}
 				m.form = m.newAliasForm()
 				return m, m.form.Init()
+
 			case "o":
 				if i := m.list.SelectedItem(); i != nil {
 					meta := i.(model.Metadata)
@@ -225,6 +292,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
+
 			case "d":
 				if i := m.list.SelectedItem(); i != nil {
 					meta := i.(model.Metadata)
@@ -239,12 +307,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.form = m.newDeleteConfirmForm()
 					return m, m.form.Init()
 				}
+
 			case "e":
 				if i := m.list.SelectedItem(); i != nil {
 					meta := i.(model.Metadata)
-
 					if meta.Type == model.TypeAlias {
-						// Aliases use the internal form
 						m.state = stateForm
 						m.formData = &formData{
 							mode:        "edit",
@@ -256,27 +323,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.form = m.newAliasForm()
 						return m, m.form.Init()
 					} else {
-						// Scripts use internal form now (as requested)
 						content, err := m.store.GetScriptContent(meta)
 						if err != nil {
 							m.status = fmt.Sprintf("Error reading content: %v", err)
 							return m, nil
 						}
-
 						m.state = stateForm
 						m.formData = &formData{
 							mode:         "edit",
 							name:         meta.Name,
 							description:  meta.Desc,
-							itemType:     "script", // or string(meta.Type)
+							itemType:     "script",
 							scriptType:   string(meta.ScriptType),
 							content:      content,
 							requiresSudo: meta.RequiresSudo,
 							usesParams:   meta.UsesParams,
-						}
-						// Use CreateScriptForm which has all fields (desc, type, etc)
-						if m.config.DefaultEditor != "" {
-							os.Setenv("EDITOR", m.config.DefaultEditor)
 						}
 						m.activeFormID = "edit_script"
 						m.form = m.newFullScriptForm()
@@ -287,50 +348,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if i := m.list.SelectedItem(); i != nil {
 					meta := i.(model.Metadata)
-					// Run logic
 					logFile, err := m.store.CreateLogFile(meta)
 					if err != nil {
-						m.err = err
+						m.status = fmt.Sprintf("Log creation error: %v", err)
 						return m, nil
 					}
 
-					cmdObj, err := runner.PrepareCommand(meta, nil, logFile, m.config.DefaultShell, "") // No params/user for now
+					cmdObj, err := runner.PrepareCommand(meta, nil, logFile, m.config.DefaultShell, "")
 					if err != nil {
-						m.err = err
+						_ = logFile.Close()
+						m.status = fmt.Sprintf("Prepare command error: %v", err)
 						return m, nil
 					}
 
-					c := tea.ExecProcess(cmdObj, func(err error) tea.Msg {
-						logFile.Close()
-						m.store.UpdateLastRun(meta)
-						if err != nil {
-							return fmt.Errorf("finished with error: %v", err)
-						}
-						return nil
-					})
-					return m, c
+					return m, m.runCommandWithTea(cmdObj, logFile, meta, false)
 				}
+
 			case "r":
 				if i := m.list.SelectedItem(); i != nil {
 					meta := i.(model.Metadata)
 					m.state = stateForm
-
-					// Pre-fill form
 					m.formData = &formData{
 						mode:     "exec_advanced",
 						name:     meta.Name,
 						itemType: string(meta.Type),
 						command:  meta.Command,
-						// Default current path if possible?
-						// Script path is in metadata but user might want to run FROM specific dir.
-						// We'll leave path empty to mean "default".
-						advPath: filepath.Dir(meta.FilePath), // Pre-fill with script dir
+						advPath:  filepath.Dir(meta.FilePath),
 					}
 					m.form = m.newAdvancedRunForm()
 					return m, m.form.Init()
 				}
+
 			case "s":
-				// Cycle sort order: name -> type -> lastrun -> name
 				switch m.config.SortOrder {
 				case "name":
 					m.config.SortOrder = "type"
@@ -342,24 +391,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.config.SortOrder = "name"
 				}
 
-				// Save config
-				// We need to access the config package SaveConfig, but m.config is a struct instance.
-				// We might need to import config package or assume we can save it.
-				// config.SaveConfig(&m.config)
-				// Wait, m.config IS *config.Config (pointer) or Config (struct)?
-				// In model.go it is likely *config.Config or we need to check.
-				// Update.go imports "github.com/jurekzsl/vellum/internal/config" ?
-				// Checking imports of update.go...
-				// It imports "github.com/jurekzsl/vellum/internal/runner" and model etc.
-				// Needs "github.com/jurekzsl/vellum/internal/config" import?
-				// Model struct likely has Config.
-				// Let's assume m.config is accessible.
-
 				if err := config.SaveConfig(m.config); err != nil {
 					m.status = fmt.Sprintf("Error saving config: %v", err)
 				} else {
-					// m.status = fmt.Sprintf("Sorted by %s", m.config.SortOrder) // Removed as per user request
-					// Reload items to apply sort
 					cmds = append(cmds, loadItems(m.store))
 				}
 				return m, tea.Batch(cmds...)
@@ -371,7 +405,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.state == stateList {
 		m.list, cmd = m.list.Update(msg)
 		cmds = append(cmds, cmd)
-	} else if m.state == stateForm {
+	} else if m.state == stateForm && m.form != nil {
 		form, cmd := m.form.Update(msg)
 		if f, ok := form.(*huh.Form); ok {
 			m.form = f
@@ -379,29 +413,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.form.State == huh.StateCompleted {
-			// Handle transitions for multi-step forms
 			if m.activeFormID == "create_meta" {
-				// Inject shebang if .sh
-				if m.formData.scriptType == ".sh" && m.formData.content == "" {
-					m.formData.content = fmt.Sprintf("#!%s\n\n", m.config.DefaultShell)
+				if m.formData.content == "" {
+					m.formData.content = model.GetDefaultTemplate(model.ScriptType(m.formData.scriptType))
 				}
 				m.activeFormID = "create_content"
-				if m.config.DefaultEditor != "" {
-					os.Setenv("EDITOR", m.config.DefaultEditor)
-				}
 				m.form = m.newCreateScriptContentForm()
-				// Init new form
 				cmds = append(cmds, m.form.Init())
 				return m, tea.Batch(cmds...)
 			}
 
-			// Process form data
 			pCmd, err := m.processForm()
 			if err != nil {
-				// If deferred execution error (placeholder), we might handle it
-				if err.Error() != "execution deferred" {
-					m.status = fmt.Sprintf("Error: %v", err)
-				}
+				m.status = fmt.Sprintf("Error: %v", err)
 			} else {
 				m.status = ""
 			}
@@ -418,54 +442,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m *Model) loadLogContent() {
+	if len(m.logFiles) == 0 {
+		m.logContent = "No log files found for this item."
+		m.logViewport.SetContent(m.logContent)
+		return
+	}
+
+	currentFile := m.logFiles[m.currentLogIdx]
+	data, err := m.store.ReadLog(m.currentLogMeta, currentFile)
+	if err != nil {
+		m.logContent = fmt.Sprintf("Error reading log '%s': %v", currentFile, err)
+	} else if strings.TrimSpace(data) == "" {
+		m.logContent = fmt.Sprintf("Log file '%s' is empty.", currentFile)
+	} else {
+		m.logContent = data
+	}
+	m.logViewport.SetContent(m.logContent)
+	m.logViewport.GotoTop()
+}
+
 func (m *Model) updateListHeight() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
 
 	h, v := appStyle.GetFrameSize()
-	lh, _ := listStyle.GetFrameSize() // Use only width overhead
-
-	// Estimated overhead:
-	// Estimated overhead:
-	// Logo: 5 lines (4 text + 1 margin)
-	// Search: 4 lines (1 text + 2 border + 1 margin)
-	// Header: 3 lines (1 text + 1 border + 1 margin)
-	// Footer: 4 lines (2 blocks * (1 text + 1 margin))
-	// List Wrapper: 2 lines (borders)
-	// Total overhead ~ 18 lines.
-	// We use 20 to be safe and prevent scrolling/duplication.
-	overhead := 20
-
-	// Available height for the list frame (including border)
-	// listStyle usually adds border (2 lines).
-	// So max content height is roughly available - 2.
-	// But SetSize sets the size of the list component including its internal paginator/help/etc?
-	// The bubbletea list component SetSize usually sets the size including borders if the list handles borders,
-	// but here we wrap list in listStyle.
-	// Bubbles list SetSize(width, height) sets the height of the list logic (items + pagination).
-	// listStyle is an external wrapper.
-	// m.list.SetSize sets the size of the INNER content if we render it like listStyle.Render(m.list.View()).
-	// Actually, m.list.SetSize sets the dimensions of the list MODEL.
-	// If we wrap it, we subtract wrapper overhead.
-
-	// Let's assume listStyle.GetFrameSize returns horizontal and vertical overhead (borders/padding).
+	lh, _ := listStyle.GetFrameSize()
 	_, lv := listStyle.GetFrameSize()
 
+	overhead := 18
 	availableHeight := m.height - v - overhead - lv
 	if availableHeight < 1 {
 		availableHeight = 1
 	}
 
-	// Dynamic sizing based on items
 	itemCount := len(m.list.VisibleItems())
-	// Min height
 	targetHeight := itemCount
 	if targetHeight < 5 {
 		targetHeight = 5
 	}
-
-	// Cap at available height
 	if targetHeight > availableHeight {
 		targetHeight = availableHeight
 	}
@@ -491,7 +507,7 @@ func (m *Model) processForm() (tea.Cmd, error) {
 				UsesParams:   m.formData.usesParams,
 			}
 			return nil, m.store.SaveScript(meta, m.formData.content)
-		} else { // Alias
+		} else {
 			meta := model.Metadata{
 				ID:           strings.ToLower(m.formData.name),
 				Name:         m.formData.name,
@@ -509,17 +525,27 @@ func (m *Model) processForm() (tea.Cmd, error) {
 		if strings.TrimSpace(m.formData.name) == "" {
 			return nil, fmt.Errorf("name is required")
 		}
-		content, err := os.ReadFile(m.formData.filePath)
+		filePath := m.formData.filePath
+		if strings.HasPrefix(filePath, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				filePath = filepath.Join(home, filePath[2:])
+			}
+		}
+		content, err := os.ReadFile(filePath)
 		if err != nil {
 			return nil, fmt.Errorf("read file failed: %w", err)
 		}
-		ext := filepath.Ext(m.formData.filePath)
+		ext := strings.ToLower(filepath.Ext(filePath))
+		scriptType := model.ScriptType(ext)
+		if scriptType == "" {
+			scriptType = model.ScriptTypeShell
+		}
 		meta := model.Metadata{
 			ID:           strings.ToLower(m.formData.name),
 			Name:         m.formData.name,
 			Desc:         m.formData.description,
 			Type:         model.TypeScript,
-			ScriptType:   model.ScriptType(ext),
+			ScriptType:   scriptType,
 			RequiresSudo: m.formData.requiresSudo,
 		}
 		return nil, m.store.SaveScript(meta, string(content))
@@ -540,25 +566,11 @@ func (m *Model) processForm() (tea.Cmd, error) {
 		}
 		return nil, m.store.AddAliasToShell(meta)
 	} else if m.formData.mode == "exec_advanced" {
-		if m.formData.advConfirm {
-			// Simpler: assume the form submission IS the confirmation
-			// But user wants explicit prompt? Since this IS a form, it acts as prompt?
-			// The checkbox says "Confirm before run?".
-			// If checked, we should probably pause?
-			// Actually, let's treat the form itself as the confirmation.
-			// Or we could trigger a confirmation dialog here.
-			// Let's implement confirmation dialog trigger.
-			m.formData.mode = "delete" // Reuse delete confirm for now? No, text is wrong.
-			// Actually, just ignore advConfirm logic for now or implement as "Show another form".
-			// Given complexity, let's treat the form as sufficient but maybe add a Pause?
-			// Let's implement the logic safely.
-		}
-
 		var meta model.Metadata
 		found := false
 		for _, item := range m.allItems {
 			if mItem, ok := item.(model.Metadata); ok {
-				if mItem.Name == m.formData.name {
+				if strings.EqualFold(mItem.Name, m.formData.name) {
 					meta = mItem
 					found = true
 					break
@@ -570,26 +582,18 @@ func (m *Model) processForm() (tea.Cmd, error) {
 			return nil, fmt.Errorf("item not found")
 		}
 
-		if m.formData.advDelay != "" {
-			d, err := time.ParseDuration(m.formData.advDelay)
-			if err == nil {
-				time.Sleep(d)
-			}
-		}
-
 		logFile, err := m.store.CreateAdvLogFile(meta)
 		if err != nil {
 			return nil, err
 		}
 
-		// Header
 		header := fmt.Sprintf("Advanced Run: %s\nParams: %s\nUser: %s\nPath: %s\n---\n",
 			time.Now().Format(time.RFC3339),
 			m.formData.advParams,
 			m.formData.advUser,
 			m.formData.advPath,
 		)
-		logFile.WriteString(header)
+		_, _ = logFile.WriteString(header)
 
 		var params []string
 		if m.formData.advParams != "" {
@@ -598,12 +602,32 @@ func (m *Model) processForm() (tea.Cmd, error) {
 
 		cmdObj, err := runner.PrepareCommand(meta, params, logFile, m.config.DefaultShell, m.formData.advUser)
 		if err != nil {
-			logFile.Close()
+			_ = logFile.Close()
 			return nil, err
 		}
 
 		if m.formData.advPath != "" {
 			cmdObj.Dir = m.formData.advPath
+		}
+
+		var delayDuration time.Duration
+		if m.formData.advDelay != "" {
+			d, err := time.ParseDuration(m.formData.advDelay)
+			if err == nil {
+				delayDuration = d
+			}
+		}
+
+		if delayDuration > 0 {
+			copyOutput := m.formData.advCopy
+			return tea.Tick(delayDuration, func(t time.Time) tea.Msg {
+				return delayedExecMsg{
+					cmdObj:     cmdObj,
+					logFile:    logFile,
+					meta:       meta,
+					copyOutput: copyOutput,
+				}
+			}), nil
 		}
 
 		return m.runCommandWithTea(cmdObj, logFile, meta, m.formData.advCopy), nil
@@ -633,20 +657,73 @@ func (m *Model) processForm() (tea.Cmd, error) {
 
 // Form Builders
 
+func getAllScriptOptions() []huh.Option[string] {
+	return []huh.Option[string]{
+		// Coding
+		huh.NewOption("Python (.py)", string(model.ScriptTypePython)),
+		huh.NewOption("JavaScript (.js)", string(model.ScriptTypeJavascript)),
+		huh.NewOption("TypeScript (.ts)", string(model.ScriptTypeTypescript)),
+		huh.NewOption("React JSX (.jsx)", string(model.ScriptTypeJSX)),
+		huh.NewOption("React TSX (.tsx)", string(model.ScriptTypeTSX)),
+		huh.NewOption("Ruby (.rb)", string(model.ScriptTypeRuby)),
+		huh.NewOption("Perl (.pl)", string(model.ScriptTypePerl)),
+		huh.NewOption("PHP (.php)", string(model.ScriptTypePHP)),
+		huh.NewOption("Lua (.lua)", string(model.ScriptTypeLua)),
+		huh.NewOption("Tcl (.tcl)", string(model.ScriptTypeTcl)),
+
+		// Shell
+		huh.NewOption("Bash / Shell (.sh)", string(model.ScriptTypeShell)),
+		huh.NewOption("Bash (.bash)", string(model.ScriptTypeBash)),
+		huh.NewOption("Zsh (.zsh)", string(model.ScriptTypeZsh)),
+		huh.NewOption("Fish (.fish)", string(model.ScriptTypeFish)),
+		huh.NewOption("PowerShell (.ps1)", string(model.ScriptTypePowershell)),
+
+		// Compiled
+		huh.NewOption("Go (.go)", string(model.ScriptTypeGo)),
+		huh.NewOption("Rust (.rs)", string(model.ScriptTypeRust)),
+		huh.NewOption("Java (.java)", string(model.ScriptTypeJava)),
+		huh.NewOption("Kotlin (.kt)", string(model.ScriptTypeKotlin)),
+		huh.NewOption("Swift (.swift)", string(model.ScriptTypeSwift)),
+
+		// System
+		huh.NewOption("AppleScript (.applescript)", string(model.ScriptTypeAppleScript)),
+		huh.NewOption("Windows Batch (.bat)", string(model.ScriptTypeBat)),
+		huh.NewOption("Windows Cmd (.cmd)", string(model.ScriptTypeCmd)),
+		huh.NewOption("VBScript (.vbs)", string(model.ScriptTypeVBS)),
+	}
+}
+
 func (m *Model) newCreateScriptMetaForm() *huh.Form {
+	if m.formData.scriptType == "" {
+		m.formData.scriptType = string(model.ScriptTypeShell)
+	}
+
 	return huh.NewForm(
 		huh.NewGroup(
-			huh.NewInput().Title("Name").Value(&m.formData.name),
-			huh.NewInput().Title("Description").Value(&m.formData.description),
+			huh.NewInput().
+				Title("Script Name").
+				Description("Unique identifier for this script (alphanumeric, dash, underscore)").
+				Placeholder("e.g. backup-database").
+				Value(&m.formData.name).
+				Validate(func(s string) error {
+					return m.store.ValidateName(s)
+				}),
+			huh.NewInput().
+				Title("Description").
+				Description("Optional description of the script's purpose").
+				Placeholder("e.g. Dumps database and compresses archive").
+				Value(&m.formData.description),
 			huh.NewSelect[string]().
-				Title("Type").
-				Options(
-					huh.NewOption("Python", ".py"),
-					huh.NewOption("Bash", ".sh"),
-					huh.NewOption("Go", ".go"),
-					huh.NewOption("JavaScript", ".js"),
-				).Value(&m.formData.scriptType),
-			huh.NewConfirm().Title("Requires Sudo?").Value(&m.formData.requiresSudo),
+				Title("Script Language / Interpreter").
+				Description("Select language (scroll or press '/' to search)").
+				Options(getAllScriptOptions()...).
+				Height(6).
+				Filtering(true).
+				Value(&m.formData.scriptType),
+			huh.NewConfirm().
+				Title("Requires Root / Sudo?").
+				Description("Execute command with elevated sudo privileges").
+				Value(&m.formData.requiresSudo),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
 }
@@ -654,18 +731,34 @@ func (m *Model) newCreateScriptMetaForm() *huh.Form {
 func (m *Model) newFullScriptForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
-			huh.NewInput().Title("Name").Value(&m.formData.name),
-			huh.NewInput().Title("Description").Value(&m.formData.description),
+			huh.NewInput().
+				Title("Script Name").
+				Description("Unique identifier for this script").
+				Value(&m.formData.name).
+				Validate(func(s string) error {
+					return m.store.ValidateName(s)
+				}),
+			huh.NewInput().
+				Title("Description").
+				Description("Summary of script behavior").
+				Value(&m.formData.description),
 			huh.NewSelect[string]().
-				Title("Type").
-				Options(
-					huh.NewOption("Python", ".py"),
-					huh.NewOption("Bash", ".sh"),
-					huh.NewOption("Go", ".go"),
-					huh.NewOption("JavaScript", ".js"),
-				).Value(&m.formData.scriptType),
-			huh.NewConfirm().Title("Requires Sudo?").Value(&m.formData.requiresSudo),
-			huh.NewText().Title("Script Content").Value(&m.formData.content),
+				Title("Script Language / Interpreter").
+				Description("Select language (scroll or press '/' to search)").
+				Options(getAllScriptOptions()...).
+				Height(6).
+				Filtering(true).
+				Value(&m.formData.scriptType),
+			huh.NewConfirm().
+				Title("Requires Root / Sudo?").
+				Value(&m.formData.requiresSudo),
+			huh.NewText().
+				Title("Script Content").
+				Description("Code executed when script runs (ctrl+e for external editor)").
+				Lines(10).
+				ShowLineNumbers(true).
+				EditorExtension(m.formData.scriptType).
+				Value(&m.formData.content),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
 }
@@ -673,7 +766,13 @@ func (m *Model) newFullScriptForm() *huh.Form {
 func (m *Model) newCreateScriptContentForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
-			huh.NewText().Title("Script Content").Value(&m.formData.content),
+			huh.NewText().
+				Title(fmt.Sprintf("Script Content (%s)", m.formData.scriptType)).
+				Description("Write or paste your script code. Use ctrl+] for new line, ctrl+e for editor, tab to finish.").
+				Lines(12).
+				ShowLineNumbers(true).
+				EditorExtension(m.formData.scriptType).
+				Value(&m.formData.content),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
 }
@@ -681,10 +780,46 @@ func (m *Model) newCreateScriptContentForm() *huh.Form {
 func (m *Model) newImportScriptForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
-			huh.NewInput().Title("Name").Value(&m.formData.name),
-			huh.NewInput().Title("Description").Value(&m.formData.description),
-			huh.NewInput().Title("File Path").Value(&m.formData.filePath),
-			huh.NewConfirm().Title("Requires Sudo?").Value(&m.formData.requiresSudo),
+			huh.NewInput().
+				Title("Script Name").
+				Description("Unique identifier for the imported script").
+				Placeholder("e.g. build-deploy").
+				Value(&m.formData.name).
+				Validate(func(s string) error {
+					return m.store.ValidateName(s)
+				}),
+			huh.NewInput().
+				Title("Description").
+				Description("Optional description of the script").
+				Placeholder("e.g. Imported deployment script").
+				Value(&m.formData.description),
+			huh.NewInput().
+				Title("File Path").
+				Description("Source file location on disk").
+				Placeholder("e.g. ~/scripts/deploy.sh").
+				Value(&m.formData.filePath).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return fmt.Errorf("file path cannot be empty")
+					}
+					clean := s
+					if strings.HasPrefix(clean, "~/") {
+						if home, err := os.UserHomeDir(); err == nil {
+							clean = filepath.Join(home, clean[2:])
+						}
+					}
+					info, err := os.Stat(clean)
+					if err != nil {
+						return fmt.Errorf("file does not exist: %w", err)
+					}
+					if info.IsDir() {
+						return fmt.Errorf("specified path is a directory, not a file")
+					}
+					return nil
+				}),
+			huh.NewConfirm().
+				Title("Requires Root / Sudo?").
+				Value(&m.formData.requiresSudo),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
 }
@@ -692,33 +827,43 @@ func (m *Model) newImportScriptForm() *huh.Form {
 func (m *Model) newAliasForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
-			huh.NewInput().Title("Name").Value(&m.formData.name),
-			huh.NewInput().Title("Description").Value(&m.formData.description),
-			huh.NewInput().Title("Command").Value(&m.formData.command),
-			huh.NewConfirm().Title("Requires Sudo?").Value(&m.formData.requiresSudo),
+			huh.NewInput().
+				Title("Alias Name").
+				Description("Shell shortcut name (e.g. gco, myip, k)").
+				Placeholder("e.g. gco").
+				Value(&m.formData.name).
+				Validate(func(s string) error {
+					return m.store.ValidateName(s)
+				}),
+			huh.NewInput().
+				Title("Description").
+				Description("Short summary of what this alias does").
+				Placeholder("e.g. Quick git checkout branch").
+				Value(&m.formData.description),
+			huh.NewInput().
+				Title("Shell Command").
+				Description("The command or pipe sequence executed by this alias").
+				Placeholder("e.g. git checkout").
+				Value(&m.formData.command).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return fmt.Errorf("command cannot be empty")
+					}
+					return nil
+				}),
+			huh.NewConfirm().
+				Title("Requires Root / Sudo?").
+				Value(&m.formData.requiresSudo),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
-}
-
-func (m *Model) newEditScriptForm() *huh.Form {
-	return huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().Title("Name").Value(&m.formData.name), // Maybe readonly?
-			huh.NewText().Title("Script Content").Value(&m.formData.content),
-		),
-	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
-}
-
-func (m *Model) newConfigsForm() *huh.Form {
-	// Placeholder if we ever need it, but 'c' is now copy
-	return nil
 }
 
 func (m *Model) newDeleteConfirmForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
-				Title(fmt.Sprintf("Are you sure you want to delete '%s'?", m.formData.name)).
+				Title(fmt.Sprintf("Delete '%s'?", m.formData.name)).
+				Description("This will permanently remove the script, metadata, and all execution logs.").
 				Value(&m.formData.confirm),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
@@ -727,52 +872,94 @@ func (m *Model) newDeleteConfirmForm() *huh.Form {
 func (m *Model) newAdvancedRunForm() *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
-			huh.NewInput().Title("Path").Value(&m.formData.advPath),
-			huh.NewInput().Title("Parameters").Value(&m.formData.advParams).Placeholder("-p value"),
-			huh.NewInput().Title("Run As User").Value(&m.formData.advUser).Placeholder("root"),
-			huh.NewInput().Title("Delay").Value(&m.formData.advDelay).Placeholder("10s"),
-			huh.NewConfirm().Title("Copy Output?").Value(&m.formData.advCopy),
-			huh.NewConfirm().Title("Confirm before run?").Value(&m.formData.advConfirm),
+			huh.NewInput().
+				Title("Working Directory").
+				Description("Directory from which the script will execute (blank for default)").
+				Placeholder("e.g. /var/www or ~/projects").
+				Value(&m.formData.advPath),
+			huh.NewInput().
+				Title("Command Arguments").
+				Description("Parameters passed to the script ($1, $2, or sys.argv)").
+				Placeholder("e.g. --port 8080 --env prod").
+				Value(&m.formData.advParams),
+			huh.NewInput().
+				Title("Run As User (sudo)").
+				Description("Target system user (leave empty for current user)").
+				Placeholder("e.g. root, postgres, www-data").
+				Value(&m.formData.advUser),
+			huh.NewInput().
+				Title("Execution Delay").
+				Description("Pause before starting execution (e.g. 5s, 1m)").
+				Placeholder("Leave blank for immediate run").
+				Value(&m.formData.advDelay),
+			huh.NewConfirm().
+				Title("Copy Output to Clipboard?").
+				Description("Automatically copy execution output to system clipboard").
+				Value(&m.formData.advCopy),
 		),
 	).WithTheme(MakeFormTheme(m.config.Theme)).WithShowHelp(false)
 }
 
 func (m *Model) runCommandWithTea(cmd *exec.Cmd, logFile *os.File, meta model.Metadata, copyOutput bool) tea.Cmd {
+	startTime := time.Now()
+	logPath := ""
+	if logFile != nil {
+		logPath = logFile.Name()
+	}
+
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		// Post-execution
-		// Read log for clipboard if requested
-		if copyOutput {
-			name := logFile.Name()
-			logFile.Close() // Close write handle
-
-			content, rErr := os.ReadFile(name)
-			if rErr == nil {
-				// Determine clipboard tool
-				var copyCmd *exec.Cmd
-				if _, err := exec.LookPath("pbcopy"); err == nil {
-					copyCmd = exec.Command("pbcopy")
-				} else if _, err := exec.LookPath("wl-copy"); err == nil {
-					copyCmd = exec.Command("wl-copy")
-				} else if _, err := exec.LookPath("xclip"); err == nil {
-					copyCmd = exec.Command("xclip", "-selection", "clipboard")
-				}
-
-				if copyCmd != nil {
-					in, _ := copyCmd.StdinPipe()
-					copyCmd.Start()
-					in.Write(content)
-					in.Close()
-					copyCmd.Wait()
-				}
-			}
-		} else {
-			logFile.Close()
+		durationMs := time.Since(startTime).Milliseconds()
+		if logFile != nil {
+			_ = logFile.Close()
 		}
 
-		m.store.UpdateLastRun(meta)
+		exitCode := 0
 		if err != nil {
-			return fmt.Errorf("finished with error: %v", err)
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 1
+			}
 		}
-		return nil
+
+		if copyOutput && logPath != "" {
+			if content, rErr := os.ReadFile(logPath); rErr == nil {
+				_ = copyToClipboard(string(content))
+			}
+		}
+
+		return execFinishedMsg{
+			meta:       meta,
+			exitCode:   exitCode,
+			durationMs: durationMs,
+			err:        err,
+		}
 	})
 }
+
+func copyToClipboard(content string) error {
+	var copyCmd *exec.Cmd
+	if _, err := exec.LookPath("pbcopy"); err == nil {
+		copyCmd = exec.Command("pbcopy")
+	} else if _, err := exec.LookPath("wl-copy"); err == nil {
+		copyCmd = exec.Command("wl-copy")
+	} else if _, err := exec.LookPath("xclip"); err == nil {
+		copyCmd = exec.Command("xclip", "-selection", "clipboard")
+	} else {
+		return fmt.Errorf("no clipboard utility found (pbcopy/wl-copy/xclip)")
+	}
+
+	copyCmd.Stdin = strings.NewReader(content)
+	return copyCmd.Run()
+}
+
+func copyToClipboardCmd(content, successMsg string) tea.Cmd {
+	return func() tea.Msg {
+		err := copyToClipboard(content)
+		return copyResultMsg{
+			status: successMsg,
+			err:    err,
+		}
+	}
+}
+

@@ -4,8 +4,10 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/huh"
 	"github.com/jurekzsl/vellum/internal/config"
+	"github.com/jurekzsl/vellum/internal/model"
 	"github.com/jurekzsl/vellum/internal/store"
 )
 
@@ -14,6 +16,7 @@ type state int
 const (
 	stateList state = iota
 	stateForm
+	stateLogView
 )
 
 type Model struct {
@@ -24,6 +27,13 @@ type Model struct {
 	form        *huh.Form
 	store       *store.Store
 	config      *config.Config
+
+	// Log Viewport
+	logViewport   viewport.Model
+	currentLogMeta model.Metadata
+	logFiles      []string
+	currentLogIdx int
+	logContent    string
 
 	// Form data holders
 	formData     *formData
@@ -39,11 +49,11 @@ type Model struct {
 }
 
 type formData struct {
-	mode         string // "create", "import", "alias", "edit"
+	mode         string // "create", "import", "alias", "edit", "exec_advanced", "delete"
 	name         string
 	description  string
 	itemType     string // "script" or "alias"
-	scriptType   string // extension
+	scriptType   string // extension (.py, .sh, etc.)
 	content      string // script content
 	command      string // command or alias
 	requiresSudo bool
@@ -62,42 +72,51 @@ type formData struct {
 }
 
 func InitialModel() Model {
-	cfg, _ := config.LoadConfig()
-	UpdateStyles(cfg.Theme) // Apply theme
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		cfg = &config.Config{
+			VellumDir:        config.GetDefaultDataDir(),
+			Theme:            "#BD93F9",
+			LogRetentionDays: 7,
+			SortOrder:        "name",
+			DefaultShell:     "/bin/bash",
+			FileManager:      config.DetectDefaultFileManager(),
+			MaxLogFiles:      50,
+		}
+	}
+
+	UpdateStyles(cfg.Theme)
 	s := store.NewStore(cfg)
-	s.EnsureDirs()
-	s.CleanLogs()
+	_ = s.EnsureDirs()
 
 	items := []list.Item{}
-	// Initial load happens in Init()
-
-	// Initial load happens in Init()
-
-	// Delegate setup
-	delegate := itemDelegate{} // Use our new custom delegate
+	delegate := itemDelegate{}
 
 	l := list.New(items, delegate, 0, 0)
 	l.SetShowTitle(false)
-	l.SetShowStatusBar(false)    // We'll render our own if needed, or keep it minimal
-	l.SetFilteringEnabled(false) // We handle filtering manually now
-	l.SetShowHelp(false)         // We render our own footer
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false) // We handle custom filtering
+	l.SetShowHelp(false)
 
-	// Search input setup
 	ti := textinput.New()
-	ti.Placeholder = "Search hosts or tags..."
-	// ti.Focus() // Start unfocused as requested
+	ti.Placeholder = "Search scripts & aliases (#s, #a)..."
 	ti.CharLimit = 156
 	ti.Width = 50
+
 	l.KeyMap.ShowFullHelp = key.NewBinding(
 		key.WithKeys("h", "?"),
 		key.WithHelp("h/?", "toggle help"),
 	)
 
+	vp := viewport.New(80, 20)
+
 	return Model{
 		state:       stateList,
 		list:        l,
 		searchInput: ti,
+		logViewport: vp,
 		store:       s,
 		config:      cfg,
 	}
 }
+

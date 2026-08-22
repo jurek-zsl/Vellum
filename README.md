@@ -1,29 +1,21 @@
 # Vellum
 
-> [!IMPORTANT]
-> WIP - Project is in very early stages of building, be aware of bugs and issues.
-
-Vellum is a multi platform CLI tool written in Go for managing and executing scripts and shell aliases with an nice TUI interface.
-
-## Platform Statuses
-
-- **Windows 10/11**: Untested
-- **macOS**: Tested on *macOS 26.2* – works (beta)
-- **Debian-based Linux (apt)**: Untested (Probably works)
-- **Arch-based Linux (pacman)**: Untested
-- **Red Hat-based Linux (dnf/rpm)**: Untested
+Vellum is a modern, cross-platform CLI tool and interactive TUI written in Go for organizing, managing, and executing scripts and shell aliases with automated logging, log retention, and integrated log viewing.
 
 ## Features
 
-- **Organize Scripts**: Manage scripts in subfolders.
-- **Aliases**: Create and manage shell aliases.
-- **TUI**: built with Bubble Tea.
-- **Logging**: Automatic logging of execution output with 7-day retention.
-- **Form Wizards**: Interactive forms for creating, importing, and editing.
+- **TUI & CLI Dual Mode**: Interactive Bubble Tea interface or headless CLI execution (`vellum run <name>`).
+- **Organize Scripts**: Manage scripts (Bash, Python, Go, Node.js, Swift, Ruby, PHP, and more) with automatic metadata tracking.
+- **Shell Aliases**: Manage and export shell aliases safely (supporting Bash, Zsh, and Fish).
+- **Integrated Log Viewer**: View historical run outputs directly inside the TUI with exit code badges and execution durations.
+- **7-Day Automated Log Cleanup**: Automatic, resource-efficient rotation and retention of old log files.
+- **Form Wizards**: Interactive forms built with Huh for creating, importing, editing, and running scripts with advanced parameters.
+- **Export & Backup**: Export all scripts and run analytics directly to Markdown or JSON.
+- **XDG Compliance**: Respects `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, and `$XDG_STATE_HOME`.
+
+---
 
 ## Installation
-
-**brew and other would be added after exiting beta**
 
 ### Prerequisites
 
@@ -34,74 +26,134 @@ Vellum is a multi platform CLI tool written in Go for managing and executing scr
 ```bash
 git clone https://github.com/jurekzsl/vellum.git
 cd vellum
-go build -o vellum ./cmd/vellum
-mv vellum /usr/local/bin/ # Optional
+make build
+# Optional: install to PATH
+sudo mv vellum /usr/local/bin/
 ```
+
+---
 
 ## Usage
 
-Run the tool:
+### Interactive TUI Mode
+
+Launch the full interactive terminal dashboard:
 
 ```bash
 vellum
 ```
 
-### Keybindings
+#### TUI Keybindings
 
-- **Navigation**: Arrow keys (`↑`, `↓`)
-- **Filter/Search**: Focus on filter bar (`/`)
-- **`enter`**: Run selected script/alias
-- **`r`**: Run scipt/alias with advanced options
-- **`a`**: Create new script
-- **`i`**: Import existing script
-- **`l`**: Add new alias
-- **`e`**: Edit selected script/alias
-- **`d`**: Delete selected script/alias
-- **`c`**: Copy Script or Alias to clipboard
-- **`o`**: Open Script or Alias subfolder in Explorer
-- **`s`**: Cycle through sorting modes
-- **`q`**: Quit
+- **Navigation**: `↑` / `↓` (or `k` / `j`)
+- **Filter / Search**: `/` (Search by keyword or tag: `#s` for scripts, `#a` for aliases)
+- **`enter`**: Run selected script or alias
+- **`v`**: Open integrated **Log Viewer** to browse execution history
+- **`r`**: Advanced run (custom parameters, directory path, non-blocking delay, copy output)
+- **`a`**: Add a new script
+- **`i`**: Import an existing script file
+- **`l`**: Add a new shell alias
+- **`e`**: Edit selected script / alias
+- **`d`**: Delete selected script / alias
+- **`c`**: Copy script or alias command to clipboard
+- **`x`**: Export all scripts and metadata to Markdown
+- **`o`**: Open script folder in native file manager
+- **`s`**: Cycle sort order (`name` ➔ `type` ➔ `lastrun`)
+- **`q`** / `ctrl+c`: Quit
 
-## Directory Structure
+#### Log Viewer Keybindings (when inside `v` mode)
 
-By default, Vellum stores data in `~/vellum/`:
+- **`↑` / `↓` / `pgup` / `pgdn`**: Scroll log content
+- **`n` / `p`** (or `tab` / `shift+tab`): View next (older) / previous (newer) log file
+- **`c`**: Copy current log output to system clipboard
+- **`g` / `G`**: Jump to top / bottom
+- **`esc` / `q`**: Return to list view
 
-- `scripts/`: Contains script files and metadata.
-- `aliases/`: Contains alias metadata.
+---
 
-Logs are stored within each script/alias folder.
+### Headless CLI Mode
+
+Run scripts directly from the terminal or in CI/CD pipelines:
+
+```bash
+# List all configured scripts and aliases
+vellum list
+vellum list --json
+
+# Execute a script or alias headlessly with arguments
+vellum run <name> [arguments...]
+
+# Export scripts and metadata to stdout
+vellum export md
+vellum export json
+
+# Print version
+vellum version
+```
+
+---
 
 ## Configuration
 
-Configuration is stored in `~/.config/vellum/config.json`.
+Configuration is stored in `~/.config/vellum/config.json` (or `$XDG_CONFIG_HOME/vellum/config.json`).
 
-### Configuration Parameters
+```json
+{
+  "theme": "#BD93F9",
+  "log_retention_days": 7,
+  "max_log_files": 50,
+  "default_shell": "/bin/zsh",
+  "default_editor": "nano",
+  "file_manager": "open",
+  "sort_order": "name"
+}
+```
 
-> [!IMPORTANT]
-> If you're using macOS setup `file_manager` to `open`. If you're using Linux setup `file_manager` to `xdg-open`. If you're using Windows setup `file_manager` to `explorer`. Without that `o` key will not work.
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `theme` | String | `"#BD93F9"` | Hex color code for the TUI theme |
+| `default_shell` | String | Auto (`$SHELL`) | Shell used to execute commands and wrappers |
+| `default_editor` | String | Auto (`$EDITOR`) | External text editor |
+| `file_manager` | String | Auto (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows) | File manager utility |
+| `sort_order` | String | `"name"` | Default sorting (`name`, `lastrun`, `type`) |
+| `log_retention_days` | Integer | `7` | Days to keep log files before auto-deletion |
+| `max_log_files` | Integer | `50` | Maximum log files per script before auto-cleanup |
 
-| Parameter | Type | Default | Description | Options / Examples |
-| :--- | :--- | :--- | :--- | :--- |
-| `theme` | String | `"#BD93F9"` | The hex color code used for the TUI theme. | `"#00FFFF"` (Cyan), `"#FF0000"` (Red) |
-| `default_shell` | String | `$SHELL` | The shell used to execute commands and scripts. Important for process substitution support. | `"/bin/zsh"`, `"/bin/bash"`, `"/usr/bin/fish"` |
-| `default_editor` | String | `$EDITOR` | The command to open the external text editor for editing scripts. | `"nano"`, `"vim"`, `"code"`, `"micro"` |
-| `sort_order` | String | `"name"` | Controls how items are sorted in the list. | `"name"` (A-Z), `"lastrun"` (Most recent first), `"type"` (Group by type) |
-| `log_retention_days`| Integer | `7` | Number of days to keep log files before auto-deletion. | `7`, `30`, `365` |
-| `max_log_files` | Integer | `50` | Maximum number of log files to keep. Oldest logs are deleted when this limit is exceeded. | `50`, `100`, `1000` |
-| `file_manager` | String | Auto | The command to open directories (used by `o` key). | `"open"` (macOS), `"xdg-open"` (Linux), `"explorer"` (Windows) |
-| `lazy_load` | Boolean | `false` | Performance optimization. If true, defers loading heavy resources. | `true`, `false` |
-| `cache_enabled` | Boolean | `true` | Enables caching of script metadata for faster startup. | `true`, `false` |
+---
 
-## Supported Types
+## Supported Script Types
 
-> [!NOTE]
-> For now there are only few script types available. I'm going to add more script types with each update.
+Vellum natively manages, detects, and executes scripts across 22 formats with language-specific boilerplates, shebangs, and interpreters:
 
-- **Coding**: `Python (.py)`, `JavaScript(.js)`, ~`Ruby (.rb)`~, ~`Perl (.pl)`~, ~`PHP (.php)`~, ~`Lua (.lua)`~, ~`Tcl (.tcl)`~, ~`TS (.ts)`~, ~`JSX (.jsx)`~, ~`TSX (.tsx)`~
-- **Shell**: `Bash (.sh)`, ~`Fish (.fish)`~, ~`PowerShell (.ps1)`~
-- **Compiled**: `Go (.go)`, ~`Rust (.rs)`~, ~`Java (.java)`~, ~`Kotlin (.kt)`~, ~`Swift (.swift)`~
-- **System**: ~`Bat (.bat)`~, ~`Cmd (.cmd)`~, ~`VBS (.vbs)`~, ~`AppleScript (.applescript)`~
+| Category | Extensions | Default Interpreter / Command |
+| :--- | :--- | :--- |
+| **Coding** | `.py` | `python3` |
+| | `.js` | `node` |
+| | `.ts` | `ts-node` / `bun` / `deno` / `node` |
+| | `.jsx` | `node` / `bun` |
+| | `.tsx` | `ts-node` / `bun` |
+| | `.rb` | `ruby` |
+| | `.pl` | `perl` |
+| | `.php` | `php` |
+| | `.lua` | `lua` |
+| | `.tcl` | `tclsh` / `tcl` |
+| **Shell** | `.sh`, `.bash` | `bash` |
+| | `.zsh` | `zsh` |
+| | `.fish` | `fish` |
+| | `.ps1` | `pwsh` / `powershell` |
+| **Compiled (Source)** | `.go` | `go run` |
+| | `.rs` | `rust-script` / `cargo run` |
+| | `.java` | `java` (Single-file source execution) |
+| | `.kt` | `kotlinc -script` / `kotlin` |
+| | `.swift` | `swift` |
+| **System** | `.applescript` | `osascript` |
+| | `.bat`, `.cmd` | `cmd.exe /c` |
+| | `.vbs` | `cscript //nologo` |
+
+---
 
 ## License
 
 MIT
+
+

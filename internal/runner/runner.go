@@ -6,75 +6,178 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/jurekzsl/vellum/internal/model"
 )
 
+// PrepareCommand builds an interactive *exec.Cmd with stdout/stderr piped to terminal and logfile
 func PrepareCommand(item model.Metadata, params []string, logFile *os.File, shell string, user string) (*exec.Cmd, error) {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	var parts []string
+
+	var fullCmd string
 
 	if item.Type == model.TypeAlias {
-		// For aliases, run directly in user's shell
-		parts = []string{shell, "-c", item.Command}
+		// For aliases: run the alias command with params appended
+		aliasStr := item.Command
+		if len(params) > 0 {
+			var quotedParams []string
+			for _, p := range params {
+				quotedParams = append(quotedParams, quoteShellArg(p))
+			}
+			aliasStr += " " + strings.Join(quotedParams, " ")
+		}
+		fullCmd = aliasStr
 	} else {
+		var parts []string
 		interpreter := getInterpreter(item.ScriptType)
 		if interpreter != "" {
-			// Handle "go run" case
-			interpreterParts := strings.Split(interpreter, " ")
-			parts = append(parts, interpreterParts...)
+			parts = append(parts, strings.Fields(interpreter)...)
 			parts = append(parts, item.FilePath)
 		} else {
 			parts = []string{item.FilePath}
 		}
+
+		parts = append(parts, params...)
+
+		var quotedParts []string
+		for _, p := range parts {
+			quotedParts = append(quotedParts, quoteShellArg(p))
+		}
+		fullCmd = strings.Join(quotedParts, " ")
 	}
 
-	parts = append(parts, params...)
-
-	// Always use Sudo as requested
-	if item.RequiresSudo {
-		parts = append([]string{"sudo"}, parts...)
+	if item.RequiresSudo && user == "" {
+		fullCmd = "sudo " + fullCmd
 	}
 
-	// Quote parts for shell wrapper
-	var quotedParts []string
-	for _, p := range parts {
-		// Single quote escaping for shell
-		escaped := strings.ReplaceAll(p, "'", "'\\''")
-		quotedParts = append(quotedParts, fmt.Sprintf("'%s'", escaped))
-	}
-	fullCmd := strings.Join(quotedParts, " ")
-
-	// Wrap in shell to wait for Enter
+	// Interactive wrapper: pause on completion so output is readable
 	wrapper := fmt.Sprintf("%s; echo ''; echo 'Press Enter to return to Vellum...'; read line", fullCmd)
 
 	var cmd *exec.Cmd
 	if user != "" {
-		// Run as user: sudo -u user shell -c wrapper
 		cmd = exec.Command("sudo", "-u", user, shell, "-c", wrapper)
 	} else {
 		cmd = exec.Command(shell, "-c", wrapper)
 	}
 
-	mwOut := io.MultiWriter(os.Stdout, logFile)
-	mwErr := io.MultiWriter(os.Stderr, logFile)
+	setSysProcAttr(cmd)
 
-	cmd.Stdout = mwOut
-	cmd.Stderr = mwErr
+	if logFile != nil {
+		cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+		cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	cmd.Stdin = os.Stdin
 
 	return cmd, nil
 }
 
+// ExecuteHeadless runs a script or alias non-interactively, capturing exit code and duration
+func ExecuteHeadless(item model.Metadata, params []string, shell string, user string, stdout io.Writer, stderr io.Writer) (int, int64, error) {
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+
+	var fullCmd string
+	if item.Type == model.TypeAlias {
+		fullCmd = item.Command
+		if len(params) > 0 {
+			var quotedParams []string
+			for _, p := range params {
+				quotedParams = append(quotedParams, quoteShellArg(p))
+			}
+			fullCmd += " " + strings.Join(quotedParams, " ")
+		}
+	} else {
+		var parts []string
+		interpreter := getInterpreter(item.ScriptType)
+		if interpreter != "" {
+			parts = append(parts, strings.Fields(interpreter)...)
+			parts = append(parts, item.FilePath)
+		} else {
+			parts = []string{item.FilePath}
+		}
+		parts = append(parts, params...)
+
+		var quotedParts []string
+		for _, p := range parts {
+			quotedParts = append(quotedParts, quoteShellArg(p))
+		}
+		fullCmd = strings.Join(quotedParts, " ")
+	}
+
+	if item.RequiresSudo && user == "" {
+		fullCmd = "sudo " + fullCmd
+	}
+
+	var cmd *exec.Cmd
+	if user != "" {
+		cmd = exec.Command("sudo", "-u", user, shell, "-c", fullCmd)
+	} else {
+		cmd = exec.Command(shell, "-c", fullCmd)
+	}
+
+	setSysProcAttr(cmd)
+
+	if stdout != nil {
+		cmd.Stdout = stdout
+	}
+	if stderr != nil {
+		cmd.Stderr = stderr
+	}
+
+	start := time.Now()
+	err := cmd.Run()
+	durationMs := time.Since(start).Milliseconds()
+
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+
+	return exitCode, durationMs, err
+}
+
+func quoteShellArg(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func getInterpreter(t model.ScriptType) string {
 	switch t {
+	// Coding
 	case model.ScriptTypePython:
 		return "python3"
-	case model.ScriptTypeJavascript, model.ScriptTypeTypescript, model.ScriptTypeJSX, model.ScriptTypeTSX:
-		// For TS/JSX we might need ts-node or similar, but let's stick to node for JS or assume user has setup
-		// For simple node scripts:
+	case model.ScriptTypeJavascript:
+		return "node"
+	case model.ScriptTypeTypescript:
+		if _, err := exec.LookPath("ts-node"); err == nil {
+			return "ts-node"
+		}
+		if _, err := exec.LookPath("bun"); err == nil {
+			return "bun run"
+		}
+		if _, err := exec.LookPath("deno"); err == nil {
+			return "deno run"
+		}
+		return "node"
+	case model.ScriptTypeJSX:
+		return "node"
+	case model.ScriptTypeTSX:
+		if _, err := exec.LookPath("ts-node"); err == nil {
+			return "ts-node"
+		}
+		if _, err := exec.LookPath("bun"); err == nil {
+			return "bun run"
+		}
 		return "node"
 	case model.ScriptTypeRuby:
 		return "ruby"
@@ -85,7 +188,12 @@ func getInterpreter(t model.ScriptType) string {
 	case model.ScriptTypeLua:
 		return "lua"
 	case model.ScriptTypeTcl:
+		if _, err := exec.LookPath("tclsh"); err == nil {
+			return "tclsh"
+		}
 		return "tcl"
+
+	// Shell
 	case model.ScriptTypeBash, model.ScriptTypeShell:
 		return "bash"
 	case model.ScriptTypeZsh:
@@ -93,53 +201,39 @@ func getInterpreter(t model.ScriptType) string {
 	case model.ScriptTypeFish:
 		return "fish"
 	case model.ScriptTypePowershell:
-		return "pwsh" // or powershell
+		if _, err := exec.LookPath("pwsh"); err == nil {
+			return "pwsh -File"
+		}
+		return "powershell -File"
+
+	// Compiled
 	case model.ScriptTypeGo:
-		return "go run" // This needs splitting
+		return "go run"
+	case model.ScriptTypeRust:
+		if _, err := exec.LookPath("rust-script"); err == nil {
+			return "rust-script"
+		}
+		return "cargo run --quiet --manifest-path"
+	case model.ScriptTypeJava:
+		return "java"
+	case model.ScriptTypeKotlin:
+		if _, err := exec.LookPath("kotlinc"); err == nil {
+			return "kotlinc -script"
+		}
+		return "kotlin"
+	case model.ScriptTypeSwift:
+		return "swift"
+
+	// System
+	case model.ScriptTypeAppleScript:
+		return "osascript"
+	case model.ScriptTypeBat, model.ScriptTypeCmd:
+		return "cmd.exe /c"
+	case model.ScriptTypeVBS:
+		return "cscript //nologo"
+
 	default:
 		return ""
 	}
 }
 
-// Special handling for multi-word interpreters like "go run"
-func PrepareCommandWithInterpreter(item model.Metadata, params []string, logFile *os.File) (*exec.Cmd, error) {
-	// Re-implementing simplified logic to handle "go run" split
-	var parts []string
-
-	interpreter := getInterpreter(item.ScriptType)
-	if interpreter == "go run" {
-		parts = []string{"go", "run"}
-	} else if interpreter != "" {
-		parts = []string{interpreter}
-	}
-
-	if item.Type == model.TypeAlias {
-		parts = []string{"/bin/sh", "-c", item.Command}
-	} else {
-		if len(parts) > 0 {
-			parts = append(parts, item.FilePath)
-		} else {
-			parts = []string{item.FilePath}
-		}
-	}
-
-	parts = append(parts, params...)
-
-	if item.RequiresSudo {
-		parts = append([]string{"sudo"}, parts...)
-	}
-
-	name := parts[0]
-	args := parts[1:]
-
-	cmd := exec.Command(name, args...)
-
-	mwOut := io.MultiWriter(os.Stdout, logFile)
-	mwErr := io.MultiWriter(os.Stderr, logFile)
-
-	cmd.Stdout = mwOut
-	cmd.Stderr = mwErr
-	cmd.Stdin = os.Stdin
-
-	return cmd, nil
-}
